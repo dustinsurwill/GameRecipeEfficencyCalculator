@@ -154,6 +154,37 @@ class ModPackModVersion(SQLModel, table=True):
 
 # ── API Schemas ───────────────────────────────────────────────────────────────
 
+class GameCreate(SQLModel):
+    name: str
+    slug: str
+    recipe_metric: str = "discrete"
+    icon_url: str | None = None
+
+class GameVersionCreate(SQLModel):
+    version: str
+    released_at: datetime | None = None
+    is_latest: bool = False
+
+class ModCreate(SQLModel):
+    game_id: uuid.UUID
+    name: str
+    slug: str
+    namespace: str
+    source_url: str | None = None
+    description: str | None = None
+
+class ModVersionCreate(SQLModel):
+    game_version_id: uuid.UUID
+    version: str
+
+class ModPackCreate(SQLModel):
+    game_version_id: uuid.UUID
+    name: str
+    slug: str
+    version: str
+    source_url: str | None = None
+    description: str | None = None
+
 class GameRead(SQLModel):
     model_config = {"from_attributes": True}
     id: uuid.UUID

@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.routes.auth import router as auth_router
 from app.api.v1.routes.users import router as users_router
 from app.api.v1.routes.admin import router as admin_router
+from app.api.v1.routes.catalog import router as catalog_router
+from app.api.v1.routes.chains import router as chains_router
 from app.api.v1.routes.recipes import router as recipes_router
 from app.config import get_settings
 
@@ -40,6 +42,8 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(catalog_router, prefix="/api/v1")
+app.include_router(chains_router, prefix="/api/v1")
 app.include_router(recipes_router, prefix="/api/v1")
 
 
