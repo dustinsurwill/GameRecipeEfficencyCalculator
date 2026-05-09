@@ -15,13 +15,24 @@ services:
       timeout: 5s
       retries: 10
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
   api:
-    build: .
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
       DEBUG: "true"
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
       # Override DB host to use the compose service name
       DATABASE_URL: postgresql+asyncpg://recipebook:recipebook@db/recipebook
       DATABASE_URL_SYNC: postgresql+psycopg2://recipebook:recipebook@db/recipebook
@@ -42,10 +53,10 @@ services:
     develop:
       watch:
         - action: sync
-          path: ./app
+          path: ./backend/app
           target: /app/app
         - action: rebuild
-          path: ./pyproject.toml
+          path: ./backend/pyproject.toml
 
 volumes:
   postgres_data:

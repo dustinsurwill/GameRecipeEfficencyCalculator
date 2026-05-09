@@ -1,6 +1,20 @@
+# Python / backend
 __pycache__/
-.idea/
+*.pyc
+*.pyo
 .venv/
-*_export/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env files (all locations)
 *.env*
-!.env.example
+!backend/.env.example
+!frontend/.env.production
+
+# IDE
+.idea/
+
+# Game export data (large, local only)
+*_export/
