@@ -4,8 +4,8 @@
 
 A community-maintained web platform for looking up and comparing crafting recipes
 across moddable games (Minecraft, Factorio, Satisfactory). The primary use case is
-ore processing chain analysis: given a raw ore, find every multi-step processing
-path to the final output (ingot/gem/etc), ranked by yield per ore.
+chain analysis: given any item, find every multi-step processing path to the target
+item, ranked by yield per input.
 
 The platform supports:
 - Multiple games, each with multiple versions
@@ -13,48 +13,94 @@ The platform supports:
 - Modpacks can override mod recipes (KubeJS, CraftTweaker, datapacks)
 - Community recipe submission with a moderated approval workflow
 - Draft/staging for new mod/modpack versions before they go public
-- Chain traversal queries: ore → intermediate → intermediate → ingot
+- Chain traversal queries: start item/tag → target item/tag, generic across item types
 
-The immediate real-world use case driving design: ATM10 (All The Mods 10) modpack
-for Minecraft 1.21.1. A working CLI analyzer already exists (separate project,
-`atm10_ore_analyzer.py`) that parses KubeJS debug exports and finds chains.
-The web platform ingests the same exports into a proper database.
+The immediate real-world use case: ATM10 (All The Mods 10) modpack for Minecraft 1.21.1.
+A working CLI analyzer (`backend/atm10_ore_analyzer.py`) parses KubeJS debug exports
+and finds chains. The web platform ingests the same exports into a proper database.
 
 ---
 
 ## Project Structure
 
 ```
-recipebook/
-├── pyproject.toml               # uv/hatch build, all deps listed
-├── alembic.ini
-├── alembic/
-│   ├── env.py                   # async-compatible, imports app.models
-│   └── versions/                # migration files go here
-├── app/
-│   ├── config.py                # pydantic-settings, reads .env
-│   ├── db.py                    # async engine, get_session dep, TimestampMixin
-│   ├── main.py                  # FastAPI app, CORS, router mounts
-│   ├── auth/
-│   │   ├── password.py          # pwdlib Argon2 — verify_and_update()
-│   │   ├── tokens.py            # JWT access+refresh, TokenData, dependencies
-│   │   ├── refresh.py           # RefreshToken table, revocation helpers
-│   │   └── oauth.py             # GitHub/Google/Authentik OAuth clients
-│   ├── models/
-│   │   ├── __init__.py          # CRITICAL: imports all table models in FK order
-│   │   ├── user.py              # User, OAuthAccount + API schemas
-│   │   ├── versioning.py        # Game, GameVersion, Mod, ModVersion, ModPack, ModPackModVersion
-│   │   ├── identity.py          # ItemIdentity, ItemAppearance, MachineIdentity, upgrades
-│   │   ├── recipe.py            # Recipe, RecipeSlot, RecipeModVersionLink, RecipeOverride
-│   │   ├── status.py            # PublicationStatus, RecipeStatus enums + RecipeReview
-│   │   └── admin.py             # AdminGroup, permission helpers, FastAPI deps
-│   └── api/v1/routes/
-│       ├── auth.py              # register, login, refresh, logout, OAuth flows
-│       ├── users.py             # /me profile, OAuth account unlinking
-│       ├── admin.py             # member management, version publish/deprecate
-│       └── recipes.py           # get, submit, review, retract, pending list
-└── tests/
-    └── test_auth.py             # 6 passing tests (register, login, profile, unauthed)
+/
+├── docker-compose.yml           # orchestrates db + api + frontend
+├── CLAUDE.md
+├── README.md
+├── .gitignore
+├── .dockerignore
+│
+├── backend/
+│   ├── Dockerfile               # Python 3.13-slim, uv-based
+│   ├── pyproject.toml           # uv/hatch build, all Python deps
+│   ├── uv.lock
+│   ├── alembic.ini
+│   ├── .env.example
+│   ├── atm10_ore_analyzer.py    # standalone CLI chain analyzer (used by importer)
+│   ├── alembic/
+│   │   ├── env.py               # async-compatible, imports app.models
+│   │   └── versions/            # 9023b2d18d99_initial_schema.py (20 tables)
+│   ├── app/
+│   │   ├── config.py            # pydantic-settings, reads .env
+│   │   ├── db.py                # async engine, get_session dep, TimestampMixin
+│   │   ├── main.py              # FastAPI app, CORS, router mounts
+│   │   ├── auth/
+│   │   │   ├── password.py      # pwdlib Argon2 — verify_and_update()
+│   │   │   ├── tokens.py        # JWT access+refresh, TokenData, dependencies
+│   │   │   ├── refresh.py       # RefreshToken table, revocation helpers
+│   │   │   └── oauth.py         # GitHub/Google/Authentik OAuth clients
+│   │   ├── models/
+│   │   │   ├── __init__.py      # CRITICAL: imports all table models in FK order
+│   │   │   ├── user.py          # User, OAuthAccount + API schemas
+│   │   │   ├── versioning.py    # Game, GameVersion, Mod, ModVersion, ModPack, ModPackModVersion
+│   │   │   ├── identity.py      # ItemIdentity, ItemAppearance, MachineIdentity, upgrades
+│   │   │   ├── recipe.py        # Recipe, RecipeSlot, RecipeModVersionLink, RecipeOverride
+│   │   │   ├── status.py        # PublicationStatus, RecipeStatus enums + RecipeReview
+│   │   │   └── admin.py         # AdminGroup, permission helpers, FastAPI deps
+│   │   ├── importer/
+│   │   │   └── pipeline.py      # KubeJS export ingestion CLI
+│   │   └── api/v1/routes/
+│   │       ├── auth.py          # register, login, refresh, logout, OAuth flows
+│   │       ├── users.py         # /me profile, OAuth account unlinking
+│   │       ├── admin.py         # member management, version publish/deprecate
+│   │       ├── catalog.py       # Game/Mod/ModVersion/ModPack CRUD
+│   │       ├── chains.py        # GET /chains — DFS traversal, yield ranking
+│   │       └── recipes.py       # get, submit, review, retract, pending list
+│   └── tests/
+│       └── test_auth.py         # 6 passing tests (register, login, profile, unauthed)
+│
+└── frontend/
+    ├── Dockerfile               # multi-stage: node build → nginx serve
+    ├── nginx.conf               # SPA fallback + /api proxy to api:8000
+    ├── .env.production          # VITE_API_BASE=/api/v1 (committed, no secrets)
+    ├── package.json
+    ├── vite.config.ts           # @tailwindcss/vite plugin
+    ├── svelte.config.js         # adapter-static, fallback: 'index.html'
+    └── src/
+        ├── app.css              # Tailwind v4 + shadcn-svelte zinc theme variables
+        ├── lib/
+        │   ├── types.ts         # TypeScript interfaces for all API shapes
+        │   ├── auth.ts          # accessToken/currentUser stores, bootAuth, logout
+        │   ├── api.ts           # fetch wrapper: Bearer injection, 401→refresh→retry
+        │   ├── utils.ts         # cn() helper, bits-ui type re-exports
+        │   └── components/
+        │       ├── NavBar.svelte
+        │       └── ui/          # shadcn-svelte components (button, card, dialog, etc.)
+        └── routes/
+            ├── +layout.ts       # export const ssr = false
+            ├── +layout.svelte   # bootAuth on mount, spinner until ready
+            ├── +page.svelte     # redirect to /admin or /login
+            ├── login/           # email+password form
+            ├── register/        # display_name + email + password
+            ├── profile/         # edit profile, unlink OAuth accounts
+            ├── oauth/[provider]/callback/  # reads token from URL hash
+            └── admin/
+                ├── +layout.svelte    # auth guard
+                ├── +page.svelte      # dashboard: modpacks + pending count
+                ├── mods/[id]/        # versions table + members management
+                ├── modpacks/[id]/    # publish/deprecate + members
+                └── recipes/          # paginated queue with approve/reject dialog
 ```
 
 ---
@@ -240,78 +286,67 @@ alembic/env.py does `import app.models` which triggers __init__.py which
 imports all table models in FK-dependency order. When adding a new model
 file, add it to app/models/__init__.py — don't add it to env.py directly.
 
+### 15. OAuth callback uses URL fragment for access token
+The OAuth callback redirects to `{frontend_url}/oauth/{provider}/callback#{access_token}`.
+The fragment is never sent to any server — only the browser sees it. The
+refresh token is set as an httpOnly cookie on the redirect response.
+The frontend reads `window.location.hash.slice(1)` in onMount and clears it
+from the URL with `history.replaceState`.
+
+### 16. Frontend is CSR-only
+`export const ssr = false` in `frontend/src/routes/+layout.ts`. The refresh
+token is in an httpOnly cookie scoped to the API domain; SSR cannot forward
+it. All auth state is bootstrapped client-side via `bootAuth()` which POSTs
+to /auth/refresh on every page load.
+
+### 17. SvelteKit frontend uses Svelte 5 runes
+The frontend uses Svelte 5 (`$state`, `$derived`, `$effect`, `$props`) not
+Svelte 4 (`export let`, reactive `$:`, `writable`). Auth state (accessToken,
+currentUser) uses Svelte stores (not runes) so they can be imported and used
+outside components.
+
 ---
 
 ## Known Issues and TODOs
 
-### High priority (needed before any data import)
-1. **No import pipeline yet.** The KubeJS debug export parser exists
-   (atm10_ore_analyzer.py, separate file) but there is no script to walk
-   the export folder and populate the DB. This is the next major piece of work.
-   The importer needs to: create Game/GameVersion/Mod/ModVersion records,
-   parse recipes using the existing parser, resolve item IDs to ItemAppearance
-   rows (creating identities if new), and set all recipe statuses to "approved"
-   for mod-native recipes (they don't need community review).
-
-2. **No chain query API endpoint yet.** The CLI analyzer does chain traversal
-   in Python over in-memory data. The web version needs this as a REST endpoint:
-   GET /api/v1/chains?game=minecraft&modpack=atm10&ore=gold&target=ingot
-   Returns ranked chains with machine sequences, yields, and chemical costs.
-   The traversal logic can be ported from atm10_ore_analyzer.py but needs to
-   query the DB instead of in-memory dicts.
-
-3. **No Alembic migrations generated yet.** Run:
-   `alembic revision --autogenerate -m "initial schema"`
-   after pointing DATABASE_URL_SYNC at a real Postgres instance.
-
 ### Medium priority
-4. **test_pending_recipes scoping is simplified.** If user has any mod admin role,
-   they see ALL pending recipes. Full implementation should join through
+1. **test_pending_recipes scoping is simplified.** If a user has any mod admin
+   role, they see ALL pending recipes. Full implementation should join through
    recipe_mod_version_links → mod_versions → mods to scope precisely.
-   See comment in recipes.py list_pending_recipes().
+   See comment in `backend/app/api/v1/routes/recipes.py`.
 
-5. **No CRUD routes for Game/Mod/ModPack creation.** Only auth, user profile,
-   admin management, and recipe review routes exist. Need routes for:
-   - POST /api/v1/games, /api/v1/mods, /api/v1/modpacks (superuser only)
-   - GET /api/v1/games, /api/v1/modpacks (public, filtered by status=published)
-   - GET /api/v1/modpacks/{id}/recipes (paginated, status=approved only for public)
+2. **tags_json should become Postgres ARRAY in production.** Migrate
+   item_appearances.tags_json from TEXT to TEXT[] (Postgres array) and add a
+   GIN index for fast tag set-intersection queries.
+   The chain traverser query pattern: WHERE '{c:ores/gold}' = ANY(tags).
 
-6. **tags_json should become Postgres ARRAY in production.** The migration
-   should alter item_appearances.tags_json from TEXT to TEXT[] (Postgres array)
-   and add a GIN index for fast tag set-intersection queries.
-   The chain traverser query pattern is:
-   WHERE '{c:ores/gold}' = ANY(tags) — O(1) with GIN index.
+3. **Email verification not implemented.** fastapi-mail is in pyproject.toml
+   but not wired up. No flow for /auth/verify or password reset yet.
 
-7. **Email verification not implemented.** The token/flow for /auth/verify
-   exists conceptually but there is no email sending integration yet.
-   fastapi-mail is in pyproject.toml but not wired up.
-
-8. **OAuth state parameter needs server-side storage.** Currently the state
-   returned from GET /auth/oauth/{provider} is sent back by the client but
-   not stored server-side for CSRF verification. A short-lived Redis or DB
-   entry for the state nonce is needed before OAuth goes to production.
+4. **OAuth state parameter needs server-side storage.** The state nonce is
+   returned from GET /auth/oauth/{provider} but not stored server-side for
+   CSRF verification. A short-lived DB or Redis entry is needed before OAuth
+   goes to production.
 
 ### Low priority / future
-9. **pgvector for item identity matching.** When importing a new modpack version,
-   some items will be new (no existing ItemIdentity). pgvector embeddings of
-   (item_name + tags) could suggest likely identity matches for curator review
-   rather than auto-creating new identities for everything.
+5. **pgvector for item identity matching.** When importing a new modpack
+   version, some items will be new. pgvector embeddings of (item_name + tags)
+   could suggest likely identity matches for curator review.
 
-10. **Machine upgrade modifiers need community data entry UI.** The DB schema
-    is ready but there's no import source — upgrade data (grinding ball stats,
-    speed upgrade multipliers) must be entered manually or scraped from tooltips.
-    The data_source field tracks provenance: "item_tooltip" | "wiki" | "community".
+6. **Machine upgrade modifiers need data entry UI.** The DB schema is ready
+   but there's no import source — upgrade data must be entered manually.
+   The data_source field tracks provenance: "item_tooltip" | "wiki" | "community".
 
-11. **Per-unit-time games (Factorio, Satisfactory).** The Game.recipe_metric
-    field distinguishes "discrete" from "throughput" but the chain traverser
-    and yield calculations don't yet account for time_ticks in the yield math.
-    For throughput games, yield should be expressed as items/second, and
-    chains should be comparable on throughput not raw item count.
+7. **Per-unit-time games (Factorio, Satisfactory).** Game.recipe_metric
+   distinguishes "discrete" from "throughput" but the chain traverser and
+   yield calculations don't yet account for time_ticks. For throughput games,
+   yield should be items/second, and chains compared on throughput not count.
 
 ---
 
 ## Tech Stack
 
+### Backend
 | Concern | Library | Version | Notes |
 |---|---|---|---|
 | Web framework | FastAPI | ≥0.115 | with standard extras |
@@ -330,42 +365,73 @@ file, add it to app/models/__init__.py — don't add it to env.py directly.
 | Test DB | aiosqlite | — | in-memory SQLite for tests |
 | Linter | ruff | ≥0.6 | |
 
+### Frontend
+| Concern | Library | Version | Notes |
+|---|---|---|---|
+| Framework | SvelteKit | 2.x | adapter-static, CSR-only |
+| Language | TypeScript | 6.x | strict mode |
+| Styling | Tailwind CSS | 4.x | CSS-first, `@tailwindcss/vite` plugin |
+| UI components | bits-ui + shadcn-svelte | 2.x | Tailwind v4 CSS variables |
+| Icons | @lucide/svelte | 1.x | |
+| Build tool | Vite | 8.x | |
+| Web server | nginx | alpine | SPA fallback + /api proxy |
+
 ---
 
-## Environment Variables (see .env.example)
+## Environment Variables
 
-Required for any functionality:
-- DATABASE_URL — postgresql+asyncpg://...
-- DATABASE_URL_SYNC — postgresql+psycopg2://... (Alembic only)
-- JWT_SECRET — random hex string, generate with: python -c "import secrets; print(secrets.token_hex(32))"
+### Backend (see `backend/.env.example`)
+
+Required:
+- `DATABASE_URL` — `postgresql+asyncpg://...`
+- `DATABASE_URL_SYNC` — `postgresql+psycopg2://...` (Alembic only)
+- `JWT_SECRET` — random hex string: `python -c "import secrets; print(secrets.token_hex(32))"`
 
 Optional (features disabled if blank):
-- GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
-- GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
-- AUTHENTIK_CLIENT_ID / AUTHENTIK_CLIENT_SECRET / AUTHENTIK_BASE_URL
-- MAIL_* (email verification, password reset)
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+- `AUTHENTIK_CLIENT_ID` / `AUTHENTIK_CLIENT_SECRET` / `AUTHENTIK_BASE_URL`
+- `MAIL_*` (email verification, password reset)
+- `FRONTEND_URL` — default `http://localhost:5173` (dev) / `http://localhost` (prod)
+- `DEBUG` — set `true` to enable /docs and HTTP cookies (default false)
+
+### Frontend
+- `VITE_API_BASE` — set in `frontend/.env` for local dev:
+  `VITE_API_BASE=http://localhost:8000/api/v1`
+- Production value (`/api/v1`) is committed in `frontend/.env.production`
 
 ---
 
 ## Running Locally
 
 ```bash
-# Install (uv recommended)
-uv venv && uv pip install -e ".[dev]"
-
-# Or pip
-pip install -e ".[dev]"
-
-# Run tests (SQLite in-memory, no Postgres needed)
-pytest tests/ -v
-
-# Run server (needs Postgres)
-cp .env.example .env  # fill in values
+# Backend
+cd backend
+cp .env.example .env     # fill in DATABASE_URL, JWT_SECRET, set DEBUG=true
+uv sync
 alembic upgrade head
-fastapi dev app/main.py
+uv run fastapi dev app/main.py   # http://localhost:8000/docs
+
+# Tests (SQLite in-memory, no Postgres needed)
+uv run pytest tests/ -v
 
 # Generate a migration after model changes
 alembic revision --autogenerate -m "describe the change"
+
+# Import a KubeJS export (after running the server once to apply migrations)
+python -m app.importer \
+  --export-dir ../allthemons_export \
+  --game minecraft --game-version 1.21.1 \
+  --modpack atm10 --modpack-version 0.18.0
+
+# Frontend (separate terminal)
+cd frontend
+cp .env.production .env   # edit to point at localhost:8000 if not already
+npm install
+npm run dev               # http://localhost:5173
+
+# Full stack via Docker
+docker compose up         # frontend at :80, API at :8000, DB at :5432
 ```
 
 ---
@@ -374,27 +440,27 @@ alembic revision --autogenerate -m "describe the change"
 
 Suggested order based on dependencies:
 
-1. **Alembic initial migration** — run autogenerate against a real Postgres
-   instance, review the output, commit the migration file.
+1. **Chain explorer UI** — `frontend/src/routes/chains/+page.svelte`:
+   modpack selector dropdown → start item/tag input → target item/tag input
+   → ranked results table with step-by-step machine sequence and yield per input.
+   Consumes `GET /api/v1/chains` (already implemented in `backend/app/api/v1/routes/chains.py`).
 
-2. **CRUD routes for Game/Mod/ModVersion/ModPack** — creation (superuser),
-   listing (public, filtered by status=published), single-item get.
-   These are prerequisites for the import pipeline.
+2. **Public catalog pages** — `frontend/src/routes/mods/`, `/modpacks/`, `/games/`:
+   listing published content, linking to chain explorer with pre-filled modpack.
 
-3. **Import pipeline** (`app/importer/`) — reads the KubeJS debug export
-   folder structure, calls the recipe parser (port from atm10_ore_analyzer.py),
-   creates/upserts all records. Entry point: `python -m app.importer <export_dir>
-   --game minecraft --game-version 1.21.1 --modpack atm10 --modpack-version 0.18.0`.
+3. **Recipe submission UI** — authenticated users submit new recipes via
+   `POST /api/v1/recipes` (already implemented in `backend/app/api/v1/routes/recipes.py`).
 
-4. **Chain query endpoint** — GET /api/v1/chains with ore/target/modpack params.
-   Port the DFS traversal from atm10_ore_analyzer.py to query RecipeSlot and
-   ItemAppearance tables. Cache results in Redis or a materialized DB view.
+4. **Email wiring** — fastapi-mail integration for account verification (`/auth/verify`)
+   and password reset. The mail config vars are already in `.env.example`.
 
-5. **Recipe CRUD** — POST /api/v1/recipes (community submission), PATCH for
-   updating drafts, listing by modpack with status filter.
+5. **OAuth state nonce** — short-lived DB or Redis entry for CSRF protection
+   during the OAuth flow. See Architecture Decision 15 and TODO item 4 above.
 
-6. **Email wiring** — fastapi-mail integration for verification and password reset.
+6. **tags_json → Postgres ARRAY** — write an Alembic migration to alter
+   `item_appearances.tags_json` from TEXT to TEXT[] and add a GIN index.
+   Update the chain traverser query in `chains.py` to use `= ANY(tags)`.
 
-7. **OAuth state nonce** — short-lived DB or Redis entry for CSRF protection.
-
-8. **SvelteKit frontend** — separate project, consumes this API.
+7. **Machine upgrade data entry** — admin UI for entering grinding ball /
+   speed upgrade modifier stats into `machine_upgrade_items` and
+   `machine_upgrade_modifiers` tables.
