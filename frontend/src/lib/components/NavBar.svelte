@@ -1,9 +1,22 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { isAuthenticated, currentUser, isSuperuser, logout } from '$lib/auth';
 	import { goto } from '$app/navigation';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Avatar from '$lib/components/ui/avatar';
 	import { Button } from '$lib/components/ui/button';
+
+	let dark = $state(false);
+
+	onMount(() => {
+		dark = document.documentElement.classList.contains('dark');
+	});
+
+	function toggleDark() {
+		dark = !dark;
+		document.documentElement.classList.toggle('dark', dark);
+		localStorage.setItem('theme', dark ? 'dark' : 'light');
+	}
 
 	async function handleLogout() {
 		await logout();
@@ -16,6 +29,17 @@
 		<a href="/" class="text-foreground text-lg font-semibold">RecipeBook</a>
 
 		<div class="flex items-center gap-3">
+			<button
+				onclick={toggleDark}
+				aria-label="Toggle dark mode"
+				class="text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors"
+			>
+				{#if dark}
+					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+				{:else}
+					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+				{/if}
+			</button>
 			{#if $isAuthenticated}
 				{#if $isSuperuser || $currentUser}
 					<a href="/admin" class="text-muted-foreground hover:text-foreground text-sm">Admin</a>

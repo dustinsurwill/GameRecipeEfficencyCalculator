@@ -6,7 +6,12 @@
 
 	let { children } = $props();
 
-	onMount(() => bootAuth());
+	onMount(() => {
+		if (localStorage.getItem('theme') === 'dark') {
+			document.documentElement.classList.add('dark');
+		}
+		bootAuth();
+	});
 </script>
 
 {#if $authReady}
