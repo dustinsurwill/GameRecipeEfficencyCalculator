@@ -140,7 +140,7 @@ def _parse_conditions_met(data: dict) -> bool:
     return True
 
 
-def parse_recipe(path: Path) -> Optional[Recipe]:
+def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe]:
     """Parse one recipe JSON file into a normalised Recipe."""
     try:
         with open(path) as f:
@@ -155,7 +155,7 @@ def parse_recipe(path: Path) -> Optional[Recipe]:
     conditions_met = _parse_conditions_met(data)
     namespace = path.parts[path.parts.index("recipes") + 1] if "recipes" in path.parts else "unknown"
     machine = machine_name(rtype)
-    recipe_id = str(path.relative_to(EXPORT_ROOT))
+    recipe_id = str(path.relative_to(export_root.resolve()))
 
     inputs: list[Slot] = []
     outputs: list[Slot] = []
@@ -733,12 +733,13 @@ def find_chains(
 
 def load_all_recipes(export_root: Path) -> list[Recipe]:
     recipes = []
+    resolved_root = export_root.resolve()
     for folder in ("recipes", "added_recipes"):
-        folder_path = export_root / folder
+        folder_path = resolved_root / folder
         if not folder_path.exists():
             continue
         for path in folder_path.rglob("*.json"):
-            r = parse_recipe(path)
+            r = parse_recipe(path, resolved_root)
             if r and r.conditions_met:
                 recipes.append(r)
     return recipes

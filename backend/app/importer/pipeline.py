@@ -31,6 +31,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+import app.models  # noqa: F401 — registers all tables with SQLAlchemy metadata
+
 from app.db import async_session_factory
 from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot, SourcePriority

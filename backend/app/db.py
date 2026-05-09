@@ -34,13 +34,17 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 # ── Shared base fields ────────────────────────────────────────────────────────
 # Not a table itself — just a mixin for created_at/updated_at
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class TimestampMixin(SQLModel):
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=_utcnow,
         nullable=False,
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=_utcnow,
         nullable=False,
-        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+        sa_column_kwargs={"onupdate": _utcnow},
     )
