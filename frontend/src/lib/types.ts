@@ -1,0 +1,152 @@
+export interface User {
+	id: string;
+	display_name: string;
+	email: string | null;
+	email_verified: boolean;
+	is_active: boolean;
+	is_superuser: boolean;
+	is_curator: boolean;
+	bio: string | null;
+	avatar_url: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface OAuthAccount {
+	id: string;
+	user_id: string;
+	provider: string;
+	provider_email: string | null;
+	last_used_at: string | null;
+}
+
+export interface UserWithAccounts extends User {
+	oauth_accounts: OAuthAccount[];
+}
+
+export interface Game {
+	id: string;
+	name: string;
+	slug: string;
+	recipe_metric: string;
+	icon_url: string | null;
+}
+
+export interface GameVersion {
+	id: string;
+	game_id: string;
+	version: string;
+	is_latest: boolean;
+	released_at: string | null;
+}
+
+export interface Mod {
+	id: string;
+	game_id: string;
+	name: string;
+	slug: string;
+	namespace: string;
+	source_url: string | null;
+	description: string | null;
+}
+
+export interface ModVersion {
+	id: string;
+	mod_id: string;
+	game_version_id: string;
+	version: string;
+	status: 'draft' | 'published' | 'deprecated' | 'archived';
+	created_at: string;
+}
+
+export interface ModPack {
+	id: string;
+	game_version_id: string;
+	name: string;
+	slug: string;
+	version: string;
+	status: 'draft' | 'published' | 'deprecated' | 'archived';
+	source_url: string | null;
+	description: string | null;
+}
+
+export interface AdminGroup {
+	id: string;
+	user_id: string;
+	scope_type: 'mod' | 'modpack';
+	scope_id: string;
+	role: 'admin' | 'maintainer';
+}
+
+export interface Recipe {
+	id: string;
+	import_key: string;
+	recipe_type: string;
+	machine_identity_id: string | null;
+	modpack_id: string | null;
+	status: 'draft' | 'pending_review' | 'approved' | 'rejected';
+	source_priority: number;
+	contributor_id: string | null;
+	created_at: string;
+}
+
+export interface RecipeSlot {
+	id: string;
+	recipe_id: string;
+	slot_type: 'input' | 'output' | 'aux_input';
+	item_appearance_id: string | null;
+	tag_string: string | null;
+	quantity: number;
+	slot_index: number;
+}
+
+export interface RecipeReview {
+	id: string;
+	recipe_id: string;
+	reviewer_id: string;
+	decision: 'approved' | 'rejected';
+	reason: string | null;
+	previous_status: string;
+	created_at: string;
+}
+
+export interface ChainStep {
+	recipe_id: string;
+	recipe_type: string;
+	machine: string | null;
+	inputs: Array<{ item: string; quantity: number }>;
+	outputs: Array<{ item: string; quantity: number }>;
+	chemicals: Array<{ item: string; quantity: number }>;
+}
+
+export interface Chain {
+	yield_per_input: number;
+	step_count: number;
+	machine_sequence: string[];
+	chemicals_required: string[];
+	steps: ChainStep[];
+}
+
+export interface ChainResponse {
+	modpack: { id: string; name: string; version: string };
+	start: string;
+	target: string;
+	chain_count: number;
+	chains: Chain[];
+}
+
+export interface PaginatedResponse<T> {
+	items: T[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
+export interface TokenClaims {
+	sub: string;
+	type: string;
+	curator: boolean;
+	superuser: boolean;
+	exp: number;
+	iat: number;
+}
