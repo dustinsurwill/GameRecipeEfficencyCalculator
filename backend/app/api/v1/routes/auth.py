@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -66,7 +67,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         key=REFRESH_COOKIE,
         value=token,
         httponly=True,       # JS cannot read this
-        secure=True,         # HTTPS only in production
+        secure=not settings.debug,  # HTTP ok in dev, HTTPS required in prod
         samesite="lax",
         max_age=settings.jwt_refresh_token_expire_days * 86400,
         path="/auth/refresh",  # cookie only sent to the refresh endpoint
@@ -239,10 +240,14 @@ async def oauth_callback(
     code: str,
     state: str,
     request: Request,
-    response: Response,
     session: Session,
-) -> dict:
-    """Step 2: exchange code for tokens, find or create user, issue JWT."""
+) -> RedirectResponse:
+    """Step 2: exchange code for tokens, find or create user, redirect to frontend.
+
+    The access token is placed in the URL fragment (#token) so it is never
+    sent to any server — only the browser sees it. The refresh token is set
+    as an httpOnly cookie on the redirect response.
+    """
     if provider not in PROVIDER_META:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown provider: {provider}")
 
@@ -262,7 +267,12 @@ async def oauth_callback(
     fetcher = PROFILE_FETCHERS[provider]
     profile = await fetcher(client, token)
 
-    return await _oauth_find_or_create(session, response, request, profile)
+    frontend_callback = f"{settings.frontend_url}/oauth/{provider}/callback"
+    redirect = RedirectResponse(frontend_callback, status_code=302)
+    token_data = await _oauth_find_or_create(session, redirect, request, profile)
+
+    redirect.headers["location"] = f"{frontend_callback}#{token_data['access_token']}"
+    return redirect
 
 
 @router.post("/oauth/{provider}/connect")

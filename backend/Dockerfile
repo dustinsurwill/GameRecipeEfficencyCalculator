@@ -8,15 +8,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir uv
-
-# Copy dependency files for layer caching — install before copying full source
+# Copy dependency files first for layer caching
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
+RUN uv sync --locked --no-dev
 
-COPY app/ app/
-
-# Copy remaining source (alembic config, tests, importer, etc.)
+# Copy application source
 COPY . .
 
 EXPOSE 8000
