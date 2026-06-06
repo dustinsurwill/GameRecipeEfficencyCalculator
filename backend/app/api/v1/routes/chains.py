@@ -10,13 +10,15 @@ Works for any item, not just ores→ingots. Examples:
   GET /chains?modpack_slug=atm10&modpack_version=0.18.0
              &start_tag=c:ores/gold&target_tag=c:ingots/gold
   GET /chains?modpack_id=<uuid>&start_item=minecraft:gold_ore&target_tag=c:ingots/gold
-  GET /chains?modpack_slug=atm10&modpack_version=0.18.0
-             &start_tag=c:dusts/iron&target_item=minecraft:iron_ingot
+  GET /chains?game_version_id=<uuid>&start_tag=c:ores/gold&target_tag=c:ingots/gold
+  GET /chains?game_id=<uuid>&start_tag=c:ores/gold&target_tag=c:ingots/gold
 
 Query parameters:
-  Modpack (one required):
-    modpack_id                       — UUID of the modpack record
-    modpack_slug + modpack_version   — slug/version pair
+  Scope (one required — most specific wins):
+    modpack_id                       — single modpack by UUID
+    modpack_slug + modpack_version   — single modpack by slug/version
+    game_version_id                  — all published modpacks for a game version
+    game_id                          — all published modpacks for a game
 
   Start (one required):
     start_tag    — tag that resolves to starting items, e.g. "c:ores/gold"
@@ -32,6 +34,7 @@ Query parameters:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections import defaultdict
@@ -45,7 +48,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.db import get_session
 from app.models.identity import ItemAppearance, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
-from app.models.versioning import ModPack, ModPackModVersion
+from app.models.status import PublicationStatus
+from app.models.versioning import Game, GameVersion, ModPack, ModPackModVersion, ModVersion
 
 router = APIRouter(prefix="/chains", tags=["chains"])
 
@@ -74,22 +78,54 @@ class _Recipe:
 
 # ── DB data loading ───────────────────────────────────────────────────────────
 
+async def _mod_version_ids_for_modpack(
+    session: AsyncSession, modpack_id: uuid.UUID
+) -> set[uuid.UUID]:
+    result = await session.exec(
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+    )
+    return {link.mod_version_id for link in result.scalars().all()}
+
+
+async def _mod_version_ids_for_game_version(
+    session: AsyncSession, game_version_id: uuid.UUID
+) -> set[uuid.UUID]:
+    mp_result = await session.exec(
+        select(ModPack).where(
+            ModPack.game_version_id == game_version_id,
+            ModPack.status == PublicationStatus.PUBLISHED,
+        )
+    )
+    ids: set[uuid.UUID] = set()
+    for mp in mp_result.scalars().all():
+        ids |= await _mod_version_ids_for_modpack(session, mp.id)
+    return ids
+
+
+async def _mod_version_ids_for_game(
+    session: AsyncSession, game_id: uuid.UUID
+) -> set[uuid.UUID]:
+    gv_result = await session.exec(
+        select(GameVersion).where(GameVersion.game_id == game_id)
+    )
+    ids: set[uuid.UUID] = set()
+    for gv in gv_result.scalars().all():
+        ids |= await _mod_version_ids_for_game_version(session, gv.id)
+    return ids
+
+
 async def _load_recipe_graph(
     session: AsyncSession,
-    modpack_id: uuid.UUID,
+    mod_version_ids: set[uuid.UUID],
 ) -> tuple[list[_Recipe], dict[str, set[str]], dict[str, set[str]]]:
     """
-    Load all recipes active in the given modpack from the DB.
+    Load all recipes active for the given mod_version_ids from the DB.
 
     Returns:
       recipes       — in-memory recipe objects with slots populated
       tag_to_items  — tag string → set of item_ids
       item_to_tags  — item_id → set of tags it belongs to
     """
-    mod_version_result = await session.exec(
-        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
-    )
-    mod_version_ids = {link.mod_version_id for link in mod_version_result.scalars().all()}
 
     if not mod_version_ids:
         return [], {}, {}
@@ -272,8 +308,10 @@ def _serialize_chain(chain: list[tuple[_Recipe, float, float]]) -> dict:
         for aux in recipe.aux_inputs:
             if aux.fluid_label:
                 chemicals.append(aux.fluid_label)
+        mod_namespace = recipe.recipe_type.split(":")[0] if ":" in recipe.recipe_type else ""
         steps.append({
             "machine": recipe.machine_name,
+            "mod_namespace": mod_namespace,
             "recipe_type": recipe.recipe_type,
             "recipe_id": str(recipe.id),
             "input_quantity": in_qty,
@@ -300,15 +338,71 @@ def _serialize_chain(chain: list[tuple[_Recipe, float, float]]) -> dict:
     }
 
 
+def _normalize_step(step: dict) -> tuple:
+    """I/O signature of a step, independent of which machine performs it."""
+    inputs = frozenset(
+        (s.get("item_id") or s.get("tag_string", ""), round(float(s["quantity"]), 4))
+        for s in step["inputs"]
+    )
+    outputs = frozenset(
+        (s["item_id"], round(float(s["quantity"]), 4))
+        for s in step["outputs"]
+        if s.get("item_id")
+    )
+    aux = frozenset(
+        (s.get("label", ""), round(float(s["quantity"]), 4))
+        for s in step.get("aux_inputs", [])
+    )
+    return (inputs, outputs, aux)
+
+
+def _merge_equivalent_chains(chains: list[dict]) -> list[dict]:
+    """
+    Group chains that are identical except for which machine performs each step.
+    Each step in the output gains a machine_options list [{name, recipe_id}].
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for chain in chains:
+        key = tuple(_normalize_step(step) for step in chain["steps"])
+        groups.setdefault(key, []).append(chain)
+
+    merged: list[dict] = []
+    for group in groups.values():
+        base = group[0]
+        for step_idx, step in enumerate(base["steps"]):
+            seen: dict[str, dict] = {}  # machine name → option dict
+            for c in group:
+                s = c["steps"][step_idx]
+                if s["machine"] not in seen:
+                    seen[s["machine"]] = {
+                        "name": s["machine"],
+                        "recipe_id": s["recipe_id"],
+                        "mod_namespace": s.get("mod_namespace", ""),
+                    }
+            step["machine_options"] = list(seen.values())
+        if len(group) > 1:
+            base["machine_sequence"] = [
+                " / ".join(dict.fromkeys(
+                    c["steps"][i]["machine"] for c in group
+                ))
+                for i in range(len(base["steps"]))
+            ]
+        merged.append(base)
+    return merged
+
+
 # ── Route ─────────────────────────────────────────────────────────────────────
 
 @router.get("")
 async def get_chains(
     session: AsyncSession = Depends(get_session),
-    # Modpack identification
+    # Scope — most specific wins; at least one required
     modpack_id: uuid.UUID | None = Query(default=None),
     modpack_slug: str | None = Query(default=None),
     modpack_version: str | None = Query(default=None),
+    mod_version_id: list[uuid.UUID] = Query(default=[]),
+    game_version_id: uuid.UUID | None = Query(default=None),
+    game_id: uuid.UUID | None = Query(default=None),
     # Start node
     start_tag: str | None = Query(default=None, description="Tag resolving to start items, e.g. 'c:ores/gold'"),
     start_item: str | None = Query(default=None, description="Concrete item_id to start from, e.g. 'minecraft:gold_ore'"),
@@ -320,52 +414,74 @@ async def get_chains(
     min_yield: float = Query(default=0.0, ge=0.0),
 ) -> dict[str, Any]:
 
-    # ── Resolve modpack ───────────────────────────────────────────────────────
-    if modpack_id:
-        mp = await session.get(ModPack, modpack_id)
-        if not mp:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-    elif modpack_slug and modpack_version:
-        result = await session.exec(
-            select(ModPack).where(
-                ModPack.slug == modpack_slug,
-                ModPack.version == modpack_version,
+    # ── Resolve scope → mod_version_ids + scope label ─────────────────────────
+    scope_label: dict[str, Any] = {}
+    mod_version_ids: set[uuid.UUID] = set()
+
+    if modpack_id or (modpack_slug and modpack_version):
+        if modpack_id:
+            mp = await session.get(ModPack, modpack_id)
+            if not mp:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+        else:
+            result = await session.exec(
+                select(ModPack).where(
+                    ModPack.slug == modpack_slug,
+                    ModPack.version == modpack_version,
+                )
             )
-        )
-        mp = result.scalars().one_or_none()
-        if not mp:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+            mp = result.scalars().one_or_none()
+            if not mp:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+        mod_version_ids = await _mod_version_ids_for_modpack(session, mp.id)
+        scope_label = {"type": "modpack", "id": str(mp.id), "slug": mp.slug, "version": mp.version, "name": mp.name}
+
+    elif mod_version_id:
+        for mvid in mod_version_id:
+            mv = await session.get(ModVersion, mvid)
+            if not mv:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"ModVersion {mvid} not found")
+        mod_version_ids = set(mod_version_id)
+        scope_label = {"type": "mods", "mod_version_ids": [str(v) for v in mod_version_id]}
+
+    elif game_version_id:
+        gv = await session.get(GameVersion, game_version_id)
+        if not gv:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "GameVersion not found")
+        mod_version_ids = await _mod_version_ids_for_game_version(session, game_version_id)
+        scope_label = {"type": "game_version", "id": str(gv.id), "version": gv.version}
+
+    elif game_id:
+        game = await session.get(Game, game_id)
+        if not game:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Game not found")
+        mod_version_ids = await _mod_version_ids_for_game(session, game_id)
+        scope_label = {"type": "game", "id": str(game.id), "name": game.name, "slug": game.slug}
+
     else:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Provide modpack_id or both modpack_slug + modpack_version",
+            "Provide one of: modpack_id, modpack_slug+modpack_version, mod_version_id (repeatable), game_version_id, game_id",
         )
 
     # ── Validate start/target params ──────────────────────────────────────────
     if not start_tag and not start_item:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Provide start_tag or start_item",
-        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide start_tag or start_item")
     if not target_tag and not target_item:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Provide target_tag or target_item",
-        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide target_tag or target_item")
 
     # ── Load recipe graph ─────────────────────────────────────────────────────
-    recipes, tag_to_items, item_to_tags = await _load_recipe_graph(session, mp.id)
+    recipes, tag_to_items, item_to_tags = await _load_recipe_graph(session, mod_version_ids)
 
     # ── Resolve start items ───────────────────────────────────────────────────
     if start_item:
-        # Single concrete item — doesn't need to be in the tag index
         resolved_start_items = [start_item]
         resolved_start_label = start_item
     else:
         resolved_start_items = list(tag_to_items.get(start_tag, set()))
         resolved_start_label = start_tag
         if not resolved_start_items:
-            return _empty_result(mp, resolved_start_label, target_tag or target_item,
+            return _empty_result(scope_label, resolved_start_label, target_tag or target_item,
                                  f"No items found in start tag '{start_tag}'")
 
     # ── Resolve target items ──────────────────────────────────────────────────
@@ -376,25 +492,28 @@ async def get_chains(
         resolved_target_items = tag_to_items.get(target_tag, set())
         resolved_target_label = target_tag
         if not resolved_target_items:
-            return _empty_result(mp, resolved_start_label, resolved_target_label,
+            return _empty_result(scope_label, resolved_start_label, resolved_target_label,
                                  f"No items found in target tag '{target_tag}'")
 
     if not recipes:
-        return _empty_result(mp, resolved_start_label, resolved_target_label,
-                             "No recipes loaded for this modpack")
+        return _empty_result(scope_label, resolved_start_label, resolved_target_label,
+                             "No recipes loaded for this scope")
 
     # ── Run DFS traversal ─────────────────────────────────────────────────────
     graph = _RecipeGraph(recipes, tag_to_items)
-    raw_chains = _find_chains(resolved_start_items, resolved_target_items, graph, max_depth)
+    raw_chains = await asyncio.to_thread(
+        _find_chains, resolved_start_items, resolved_target_items, graph, max_depth
+    )
     raw_chains = _deduplicate(raw_chains)
 
     chains = [_serialize_chain(c) for c in raw_chains]
+    chains = _merge_equivalent_chains(chains)
     if min_yield > 0:
         chains = [c for c in chains if c["yield_per_input"] >= min_yield]
     chains.sort(key=lambda c: c["yield_per_input"], reverse=True)
 
     return {
-        "modpack": {"id": str(mp.id), "slug": mp.slug, "version": mp.version},
+        "scope": scope_label,
         "start": resolved_start_label,
         "target": resolved_target_label,
         "chain_count": len(chains),
@@ -402,9 +521,9 @@ async def get_chains(
     }
 
 
-def _empty_result(mp: ModPack, start: str | None, target: str | None, note: str) -> dict:
+def _empty_result(scope: dict, start: str | None, target: str | None, note: str) -> dict:
     return {
-        "modpack": {"id": str(mp.id), "slug": mp.slug, "version": mp.version},
+        "scope": scope,
         "start": start,
         "target": target,
         "chain_count": 0,

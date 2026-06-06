@@ -54,6 +54,7 @@ class ItemIdentity(TimestampMixin, table=True):
     game_id: uuid.UUID = Field(foreign_key="games.id", index=True)
     # Human notes for curators
     notes: str | None = None
+    icon_url: str | None = None
 
     appearances: list["ItemAppearance"] = Relationship(back_populates="identity")
 
@@ -112,6 +113,7 @@ class MachineIdentity(TimestampMixin, table=True):
     recipe_types_json: str = Field(default="[]")
     # Whether this machine processes items per-unit or per-time
     is_time_based: bool = Field(default=False)
+    icon_url: str | None = None
 
     upgrade_items: list["MachineUpgradeItem"] = Relationship(
         back_populates="machine"
@@ -176,6 +178,7 @@ class ItemIdentityRead(SQLModel):
     canonical_namespace: str | None
     game_id: uuid.UUID
     notes: str | None
+    icon_url: str | None
 
 
 class ItemAppearanceRead(SQLModel):
@@ -196,6 +199,7 @@ class MachineIdentityRead(SQLModel):
     name: str
     recipe_types_json: str
     is_time_based: bool
+    icon_url: str | None
 
 
 class MachineUpgradeModifierRead(SQLModel):
@@ -214,3 +218,8 @@ class MachineUpgradeItemRead(SQLModel):
     max_slots: int | None
     data_source: str
     modifiers: list[MachineUpgradeModifierRead] = []
+
+
+class ItemAppearanceWithIdentityRead(SQLModel):
+    appearance: ItemAppearanceRead
+    identity: ItemIdentityRead

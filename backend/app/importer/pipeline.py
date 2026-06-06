@@ -99,7 +99,7 @@ async def _get_or_create_modpack(
             name=name,
             slug=slug,
             version=version,
-            status=PublicationStatus.DRAFT,
+            status=PublicationStatus.PUBLISHED,
         )
         session.add(mp)
         await session.flush()

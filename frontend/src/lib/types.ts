@@ -48,6 +48,7 @@ export interface Mod {
 	namespace: string;
 	source_url: string | null;
 	description: string | null;
+	icon_url: string | null;
 }
 
 export interface ModVersion {
@@ -68,6 +69,7 @@ export interface ModPack {
 	status: 'draft' | 'published' | 'deprecated' | 'archived';
 	source_url: string | null;
 	description: string | null;
+	icon_url: string | null;
 }
 
 export interface AdminGroup {
@@ -110,13 +112,37 @@ export interface RecipeReview {
 	created_at: string;
 }
 
+export interface ChainStepSlot {
+	item_id: string | null;
+	tag_string: string | null;
+	quantity: number;
+}
+
+export interface ChainStepOutput {
+	item_id: string;
+	quantity: number;
+}
+
+export interface ChainStepAux {
+	label: string;
+	quantity: number;
+}
+
+export interface MachineOption {
+	name: string;
+	recipe_id: string;
+}
+
 export interface ChainStep {
 	recipe_id: string;
 	recipe_type: string;
-	machine: string | null;
-	inputs: Array<{ item: string; quantity: number }>;
-	outputs: Array<{ item: string; quantity: number }>;
-	chemicals: Array<{ item: string; quantity: number }>;
+	machine: string;
+	machine_options: MachineOption[];
+	input_quantity: number;
+	output_quantity: number;
+	inputs: ChainStepSlot[];
+	outputs: ChainStepOutput[];
+	aux_inputs: ChainStepAux[];
 }
 
 export interface Chain {
@@ -142,6 +168,44 @@ export interface PaginatedResponse<T> {
 	offset: number;
 }
 
+export interface MachineIdentity {
+	id: string;
+	game_id: string;
+	mod_id: string | null;
+	name: string;
+	recipe_types_json: string;
+	is_time_based: boolean;
+	icon_url: string | null;
+}
+
+export interface ItemIdentity {
+	id: string;
+	canonical_name: string;
+	canonical_namespace: string | null;
+	game_id: string;
+	notes: string | null;
+	icon_url: string | null;
+}
+
+export interface ItemAppearance {
+	id: string;
+	identity_id: string;
+	mod_version_id: string;
+	item_id: string;
+	namespace: string;
+	tags_json: string;
+}
+
+export interface ItemAppearanceWithIdentity {
+	appearance: ItemAppearance;
+	identity: ItemIdentity;
+}
+
+export interface ModPackModEntry {
+	mod: Mod;
+	mod_version: ModVersion;
+}
+
 export interface TokenClaims {
 	sub: string;
 	type: string;
@@ -149,4 +213,37 @@ export interface TokenClaims {
 	superuser: boolean;
 	exp: number;
 	iat: number;
+}
+
+export interface ItemIdentityRead {
+	id: string;
+	canonical_name: string;
+	canonical_namespace: string | null;
+	game_id: string;
+	notes: string | null;
+	icon_url: string | null;
+}
+
+export interface RecipeSlotInfo {
+	item_id: string | null;
+	tag_string: string | null;
+	quantity: number;
+	is_fluid: boolean;
+	fluid_label: string | null;
+}
+
+export interface RecipeInfo {
+	id: string;
+	recipe_type: string;
+	mod_namespace: string;
+	machine_name: string;
+	inputs: RecipeSlotInfo[];
+	outputs: RecipeSlotInfo[];
+	aux_inputs: RecipeSlotInfo[];
+}
+
+export interface ItemInfoRead {
+	item_id: string;
+	produces: RecipeInfo[];
+	uses: RecipeInfo[];
 }

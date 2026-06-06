@@ -75,6 +75,7 @@ class Mod(TimestampMixin, table=True):
     namespace: str = Field(index=True)  # "mekanism" — the item ID prefix
     source_url: str | None = None # CurseForge / Modrinth / GitHub URL
     description: str | None = None
+    icon_url: str | None = None
 
     game: Game = Relationship(back_populates="mods")
     versions: list["ModVersion"] = Relationship(back_populates="mod")
@@ -124,6 +125,7 @@ class ModPack(TimestampMixin, table=True):
     version: str                  # "0.18.0-beta"
     source_url: str | None = None
     description: str | None = None
+    icon_url: str | None = None
     # Publication state — only published packs are visible to public
     status: str = Field(default=PublicationStatus.DRAFT, index=True)
 
@@ -172,6 +174,7 @@ class ModCreate(SQLModel):
     namespace: str
     source_url: str | None = None
     description: str | None = None
+    icon_url: str | None = None
 
 class ModVersionCreate(SQLModel):
     game_version_id: uuid.UUID
@@ -184,6 +187,7 @@ class ModPackCreate(SQLModel):
     version: str
     source_url: str | None = None
     description: str | None = None
+    icon_url: str | None = None
 
 class GameRead(SQLModel):
     model_config = {"from_attributes": True}
@@ -209,6 +213,8 @@ class ModRead(SQLModel):
     slug: str
     namespace: str
     source_url: str | None
+    description: str | None
+    icon_url: str | None
 
 class ModVersionRead(SQLModel):
     model_config = {"from_attributes": True}
@@ -227,4 +233,6 @@ class ModPackRead(SQLModel):
     slug: str
     version: str
     source_url: str | None
+    description: str | None
+    icon_url: str | None
     status: str

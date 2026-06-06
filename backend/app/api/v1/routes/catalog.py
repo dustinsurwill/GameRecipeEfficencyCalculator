@@ -24,13 +24,21 @@ a superuser or mod/modpack admin.
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.auth.tokens import TokenData, get_current_token_data
 from app.db import get_session
 from app.models.admin import AdminRole, AdminScopeType, is_mod_admin, is_modpack_admin
+from app.models.identity import (
+    ItemAppearance, ItemAppearanceRead,
+    ItemIdentity, ItemIdentityRead,
+    ItemAppearanceWithIdentityRead,
+    MachineIdentity, MachineIdentityRead,
+)
+from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
 from app.models.status import PublicationStatus
 from app.models.versioning import (
     Game, GameCreate, GameRead, GameVersion, GameVersionCreate, GameVersionRead,
@@ -121,6 +129,35 @@ async def create_game_version(
     return gv
 
 
+@router.get("/games/{game_id}/machines", response_model=list[MachineIdentityRead])
+async def list_game_machines(game_id: uuid.UUID, session: Session) -> list[MachineIdentity]:
+    game = await session.get(Game, game_id)
+    if not game:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Game not found")
+    result = await session.exec(
+        select(MachineIdentity).where(MachineIdentity.game_id == game_id).order_by(MachineIdentity.name)
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/games/{game_id}/items", response_model=list[ItemIdentityRead])
+async def list_game_items(
+    game_id: uuid.UUID,
+    session: Session,
+    search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[ItemIdentity]:
+    game = await session.get(Game, game_id)
+    if not game:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Game not found")
+    q = select(ItemIdentity).where(ItemIdentity.game_id == game_id)
+    if search:
+        q = q.where(ItemIdentity.canonical_name.icontains(search))
+    result = await session.exec(q.order_by(ItemIdentity.canonical_name).offset(offset).limit(limit))
+    return list(result.scalars().all())
+
+
 # ── Mods ──────────────────────────────────────────────────────────────────────
 
 @router.get("/mods", response_model=list[ModRead])
@@ -209,11 +246,16 @@ async def create_mod_version(
 async def list_modpacks(
     session: Session,
     game_version_id: uuid.UUID | None = None,
+    game_id: uuid.UUID | None = None,
     token: TokenData | None = Depends(_optional_token),
 ) -> list[ModPack]:
     q = select(ModPack).order_by(ModPack.name, ModPack.version)
     if game_version_id:
         q = q.where(ModPack.game_version_id == game_version_id)
+    elif game_id:
+        gvs = await session.exec(select(GameVersion).where(GameVersion.game_id == game_id))
+        gv_ids = [gv.id for gv in gvs.scalars().all()]
+        q = q.where(ModPack.game_version_id.in_(gv_ids))
 
     is_admin = token and token.is_superuser
     if not is_admin:
@@ -285,3 +327,382 @@ async def add_mod_version_to_modpack(
     link = ModPackModVersion(modpack_id=modpack_id, mod_version_id=mod_version_id)
     session.add(link)
     await session.commit()
+
+
+# ── ModPack mod listing ───────────────────────────────────────────────────────
+
+class ModPackModEntry(SQLModel):
+    mod: ModRead
+    mod_version: ModVersionRead
+
+
+@router.get("/modpacks/{modpack_id}/mods", response_model=list[ModPackModEntry])
+async def list_modpack_mods(
+    modpack_id: uuid.UUID,
+    session: Session,
+    token: TokenData | None = Depends(_optional_token),
+) -> list[ModPackModEntry]:
+    mp = await session.get(ModPack, modpack_id)
+    if not mp:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+
+    is_admin = token and (
+        token.is_superuser
+        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
+    )
+    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+
+    links_result = await session.exec(
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+    )
+    entries: list[ModPackModEntry] = []
+    for link in links_result.scalars().all():
+        mv = await session.get(ModVersion, link.mod_version_id)
+        if not mv:
+            continue
+        mod = await session.get(Mod, mv.mod_id)
+        if not mod:
+            continue
+        entries.append(ModPackModEntry(
+            mod=ModRead.model_validate(mod),
+            mod_version=ModVersionRead.model_validate(mv),
+        ))
+    entries.sort(key=lambda e: e.mod.name)
+    return entries
+
+
+@router.get("/modpacks/{modpack_id}/machines", response_model=list[MachineIdentityRead])
+async def list_modpack_machines(
+    modpack_id: uuid.UUID,
+    session: Session,
+    token: TokenData | None = Depends(_optional_token),
+) -> list[MachineIdentity]:
+    mp = await session.get(ModPack, modpack_id)
+    if not mp:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+    is_admin = token and (
+        token.is_superuser
+        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
+    )
+    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+
+    gv = await session.get(GameVersion, mp.game_version_id)
+
+    links_result = await session.exec(
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+    )
+    namespaces: set[str] = set()
+    for link in links_result.scalars().all():
+        mv = await session.get(ModVersion, link.mod_version_id)
+        if mv:
+            mod = await session.get(Mod, mv.mod_id)
+            if mod:
+                namespaces.add(mod.namespace)
+
+    game_machines_result = await session.exec(
+        select(MachineIdentity).where(MachineIdentity.game_id == gv.game_id)
+    )
+    machines = [
+        m for m in game_machines_result.scalars().all()
+        if any(f"{ns}:" in m.recipe_types_json for ns in namespaces)
+    ]
+    return sorted(machines, key=lambda m: m.name)
+
+
+@router.get("/modpacks/{modpack_id}/items", response_model=list[ItemAppearanceWithIdentityRead])
+async def list_modpack_items(
+    modpack_id: uuid.UUID,
+    session: Session,
+    search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    token: TokenData | None = Depends(_optional_token),
+) -> list[ItemAppearanceWithIdentityRead]:
+    mp = await session.get(ModPack, modpack_id)
+    if not mp:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+    is_admin = token and (
+        token.is_superuser
+        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
+    )
+    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+
+    links_result = await session.exec(
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+    )
+    mv_ids = [link.mod_version_id for link in links_result.scalars().all()]
+    if not mv_ids:
+        return []
+
+    q = select(ItemAppearance).where(ItemAppearance.mod_version_id.in_(mv_ids))
+    if search:
+        q = q.where(ItemAppearance.item_id.icontains(search))
+    appearances_result = await session.exec(
+        q.order_by(ItemAppearance.item_id).offset(offset).limit(limit)
+    )
+    appearances = list(appearances_result.scalars().all())
+
+    identity_ids = {a.identity_id for a in appearances}
+    identities_result = await session.exec(
+        select(ItemIdentity).where(ItemIdentity.id.in_(identity_ids))
+    )
+    identity_map = {i.id: i for i in identities_result.scalars().all()}
+
+    entries: list[ItemAppearanceWithIdentityRead] = []
+    for app in appearances:
+        identity = identity_map.get(app.identity_id)
+        if not identity:
+            continue
+        entries.append(ItemAppearanceWithIdentityRead(
+            appearance=ItemAppearanceRead.model_validate(app),
+            identity=ItemIdentityRead.model_validate(identity),
+        ))
+    return entries
+
+
+# ── Mod detail endpoints ──────────────────────────────────────────────────────
+
+@router.get("/mods/{mod_id}/machines", response_model=list[MachineIdentityRead])
+async def list_mod_machines(
+    mod_id: uuid.UUID,
+    session: Session,
+) -> list[MachineIdentity]:
+    mod = await session.get(Mod, mod_id)
+    if not mod:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mod not found")
+
+    by_fk_result = await session.exec(
+        select(MachineIdentity).where(MachineIdentity.mod_id == mod_id)
+    )
+    by_fk = list(by_fk_result.scalars().all())
+    found_ids = {m.id for m in by_fk}
+
+    game_machines_result = await session.exec(
+        select(MachineIdentity).where(MachineIdentity.game_id == mod.game_id)
+    )
+    prefix = f"{mod.namespace}:"
+    by_namespace = [
+        m for m in game_machines_result.scalars().all()
+        if m.id not in found_ids and prefix in m.recipe_types_json
+    ]
+
+    return sorted(by_fk + by_namespace, key=lambda m: m.name)
+
+
+@router.get("/mods/{mod_id}/items", response_model=list[ItemAppearanceWithIdentityRead])
+async def list_mod_items(
+    mod_id: uuid.UUID,
+    session: Session,
+    mod_version_id: uuid.UUID | None = None,
+    search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[ItemAppearanceWithIdentityRead]:
+    mod = await session.get(Mod, mod_id)
+    if not mod:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mod not found")
+
+    if mod_version_id:
+        mv = await session.get(ModVersion, mod_version_id)
+        if not mv or mv.mod_id != mod_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "ModVersion not found for this mod")
+        target_mv_id = mod_version_id
+    else:
+        mv_result = await session.exec(
+            select(ModVersion)
+            .where(ModVersion.mod_id == mod_id, ModVersion.status == PublicationStatus.PUBLISHED)
+            .order_by(ModVersion.imported_at.desc())
+            .limit(1)
+        )
+        mv = mv_result.scalars().one_or_none()
+        if not mv:
+            return []
+        target_mv_id = mv.id
+
+    q = select(ItemAppearance).where(ItemAppearance.mod_version_id == target_mv_id)
+    if search:
+        q = q.where(ItemAppearance.item_id.icontains(search))
+    appearances_result = await session.exec(
+        q.order_by(ItemAppearance.item_id).offset(offset).limit(limit)
+    )
+    appearances = list(appearances_result.scalars().all())
+
+    identity_ids = {a.identity_id for a in appearances}
+    identities_result = await session.exec(
+        select(ItemIdentity).where(ItemIdentity.id.in_(identity_ids))
+    )
+    identity_map = {i.id: i for i in identities_result.scalars().all()}
+
+    entries: list[ItemAppearanceWithIdentityRead] = []
+    for app in appearances:
+        identity = identity_map.get(app.identity_id)
+        if not identity:
+            continue
+        entries.append(ItemAppearanceWithIdentityRead(
+            appearance=ItemAppearanceRead.model_validate(app),
+            identity=ItemIdentityRead.model_validate(identity),
+        ))
+    return entries
+
+
+# ── JEI-style item info ───────────────────────────────────────────────────────
+
+class RecipeSlotInfo(SQLModel):
+    item_id: str | None
+    tag_string: str | None
+    quantity: float
+    is_fluid: bool
+    fluid_label: str | None
+
+
+class RecipeInfo(SQLModel):
+    id: uuid.UUID
+    recipe_type: str
+    mod_namespace: str
+    machine_name: str
+    inputs: list["RecipeSlotInfo"]
+    outputs: list["RecipeSlotInfo"]
+    aux_inputs: list["RecipeSlotInfo"]
+
+
+class ItemInfoRead(SQLModel):
+    item_id: str
+    produces: list["RecipeInfo"]
+    uses: list["RecipeInfo"]
+
+
+async def _load_recipe_infos(
+    session: AsyncSession,
+    recipe_ids: set[uuid.UUID],
+    appearance_id_to_item: dict[uuid.UUID, str],
+) -> list[RecipeInfo]:
+    if not recipe_ids:
+        return []
+    from collections import defaultdict as _dd
+
+    machine_result = await session.exec(select(MachineIdentity))
+    machine_map: dict[uuid.UUID, str] = {m.id: m.name for m in machine_result.scalars().all()}
+
+    recipes_result = await session.exec(select(Recipe).where(Recipe.id.in_(recipe_ids)))
+    db_recipes = list(recipes_result.scalars().all())
+
+    slots_result = await session.exec(select(RecipeSlot).where(RecipeSlot.recipe_id.in_(recipe_ids)))
+    slots_by_recipe: dict[uuid.UUID, list[RecipeSlot]] = _dd(list)
+    for s in slots_result.scalars().all():
+        slots_by_recipe[s.recipe_id].append(s)
+
+    infos: list[RecipeInfo] = []
+    for db_r in db_recipes:
+        inputs, outputs, aux = [], [], []
+        for sl in sorted(slots_by_recipe[db_r.id], key=lambda s: s.slot_order):
+            item_id = appearance_id_to_item.get(sl.item_appearance_id) if sl.item_appearance_id else None
+            si = RecipeSlotInfo(
+                item_id=item_id,
+                tag_string=sl.tag_string,
+                quantity=sl.quantity,
+                is_fluid=sl.is_fluid,
+                fluid_label=sl.fluid_label,
+            )
+            if sl.slot_type == "output":
+                outputs.append(si)
+            elif sl.slot_type == "input":
+                inputs.append(si)
+            else:
+                aux.append(si)
+        rt = db_r.recipe_type
+        infos.append(RecipeInfo(
+            id=db_r.id,
+            recipe_type=rt,
+            mod_namespace=rt.split(":")[0] if ":" in rt else rt,
+            machine_name=machine_map.get(db_r.machine_identity_id, rt),
+            inputs=inputs,
+            outputs=outputs,
+            aux_inputs=aux,
+        ))
+    return infos
+
+
+@router.get("/item-info", response_model=ItemInfoRead)
+async def get_item_info(
+    session: Session,
+    item_id: str = Query(...),
+    mod_version_id: list[uuid.UUID] = Query(default=[]),
+) -> ItemInfoRead:
+    """Recipes that produce or consume item_id within the given mod version scope."""
+    if not mod_version_id:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide at least one mod_version_id")
+
+    appearances_result = await session.exec(
+        select(ItemAppearance).where(
+            ItemAppearance.item_id == item_id,
+            ItemAppearance.mod_version_id.in_(mod_version_id),
+        )
+    )
+    appearance_ids = [a.id for a in appearances_result.scalars().all()]
+
+    all_apps_result = await session.exec(
+        select(ItemAppearance).where(ItemAppearance.mod_version_id.in_(mod_version_id))
+    )
+    appearance_id_to_item: dict[uuid.UUID, str] = {a.id: a.item_id for a in all_apps_result.scalars().all()}
+
+    links_result = await session.exec(
+        select(RecipeModVersionLink).where(RecipeModVersionLink.mod_version_id.in_(mod_version_id))
+    )
+    scoped_recipe_ids = {lnk.recipe_id for lnk in links_result.scalars().all()}
+
+    async def _by_role(role: str) -> set[uuid.UUID]:
+        if not appearance_ids:
+            return set()
+        r = await session.exec(
+            select(RecipeSlot).where(
+                RecipeSlot.item_appearance_id.in_(appearance_ids),
+                RecipeSlot.slot_type == role,
+            )
+        )
+        return {s.recipe_id for s in r.scalars().all()} & scoped_recipe_ids
+
+    produces_ids = await _by_role("output")
+    uses_ids = await _by_role("input")
+
+    infos_map = {r.id: r for r in await _load_recipe_infos(
+        session, produces_ids | uses_ids, appearance_id_to_item
+    )}
+    return ItemInfoRead(
+        item_id=item_id,
+        produces=[infos_map[rid] for rid in produces_ids if rid in infos_map],
+        uses=[infos_map[rid] for rid in uses_ids if rid in infos_map],
+    )
+
+
+@router.get("/machines/{machine_id}/recipes", response_model=list[RecipeInfo])
+async def get_machine_recipes(
+    machine_id: uuid.UUID,
+    session: Session,
+    mod_version_id: list[uuid.UUID] = Query(default=[]),
+) -> list[RecipeInfo]:
+    """All recipes for a machine within the given mod version scope."""
+    machine = await session.get(MachineIdentity, machine_id)
+    if not machine:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Machine not found")
+    if not mod_version_id:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide at least one mod_version_id")
+
+    links_result = await session.exec(
+        select(RecipeModVersionLink).where(RecipeModVersionLink.mod_version_id.in_(mod_version_id))
+    )
+    scoped_recipe_ids = {lnk.recipe_id for lnk in links_result.scalars().all()}
+
+    machine_recipes_result = await session.exec(
+        select(Recipe).where(Recipe.machine_identity_id == machine_id)
+    )
+    recipe_ids = {r.id for r in machine_recipes_result.scalars().all()} & scoped_recipe_ids
+
+    all_apps_result = await session.exec(
+        select(ItemAppearance).where(ItemAppearance.mod_version_id.in_(mod_version_id))
+    )
+    appearance_id_to_item: dict[uuid.UUID, str] = {a.id: a.item_id for a in all_apps_result.scalars().all()}
+
+    return await _load_recipe_infos(session, recipe_ids, appearance_id_to_item)

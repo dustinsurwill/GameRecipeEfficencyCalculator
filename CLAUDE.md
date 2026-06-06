@@ -75,18 +75,30 @@ docker compose up           # :8080 frontend, :8081 backend, :5432 db
 
 ---
 
+## Chain Calculation: Worker Processes
+
+The DFS in `chains.py` is CPU-bound. It is already wrapped in `asyncio.to_thread()` so it does not block the event loop during traversal. For true CPU parallelism across simultaneous requests, run multiple uvicorn workers:
+
+```bash
+# Production (Docker / gunicorn)
+gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker
+
+# Or directly
+uv run uvicorn app.main:app --workers 4
+```
+
+Rule of thumb: `workers = 2 × CPU_cores + 1`. For development a single worker is fine. Note that `fastapi dev` always runs 1 worker with hot-reload; use the gunicorn command for load testing.
+
+---
+
 ## What to Work On Next
 
 1. **Backend rate limiting** — `backend/app/api/v1/routes/chains.py`: add slowapi rate limit on `GET /chains` keyed by client IP (anonymous: ~20 req/min). Frontend already handles 429.
 
-2. **Modpack selector on home page** — `frontend/src/routes/+page.svelte`: add a dropdown to pick a modpack (fetched from `GET /api/v1/catalog/modpacks`). The `modpackId` state variable is already wired to the query.
+2. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (already implemented).
 
-3. **Public catalog pages** — `frontend/src/routes/mods/`, `/modpacks/`, `/games/`: list published content, link to chain explorer with pre-filled modpack.
+3. **Email wiring** — fastapi-mail for `/auth/verify` and password reset. Mail config already in `.env.example`.
 
-4. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (already implemented).
+4. **OAuth state nonce** — server-side storage (DB or Redis) for CSRF protection. See [architecture.md](docs/architecture.md#known-issues-and-todos).
 
-5. **Email wiring** — fastapi-mail for `/auth/verify` and password reset. Mail config already in `.env.example`.
-
-6. **OAuth state nonce** — server-side storage (DB or Redis) for CSRF protection. See [architecture.md](docs/architecture.md#known-issues-and-todos).
-
-7. **tags_json → Postgres ARRAY** — Alembic migration + GIN index on `item_appearances`. See [architecture.md](docs/architecture.md#12-tags_json-as-text-temporary).
+5. **tags_json → Postgres ARRAY** — Alembic migration + GIN index on `item_appearances`. See [architecture.md](docs/architecture.md#12-tags_json-as-text-temporary).

@@ -146,6 +146,41 @@ OAuth callback URL to register: `http://<your-domain>/api/v1/auth/oauth/<provide
 
 ---
 
+## Getting Admin Access (Local Dev)
+
+After registering an account, promote it to superuser in the database:
+
+```bash
+# With Docker (Postgres running via docker compose up):
+docker exec -it recipebook-db-1 psql -U recipebook -d recipebook \
+  -c "UPDATE users SET is_superuser = true WHERE email = 'you@example.com';"
+
+# Without Docker (uv + DATABASE_URL from backend/.env):
+cd backend
+uv run python - <<'EOF'
+import asyncio
+from sqlmodel import select
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from app.config import settings
+from app.models.user import User
+
+async def main():
+    engine = create_async_engine(settings.database_url)
+    async with AsyncSession(engine) as s:
+        result = await s.exec(select(User).where(User.email == "you@example.com"))
+        u = result.one()
+        u.is_superuser = True
+        s.add(u)
+        await s.commit()
+
+asyncio.run(main())
+EOF
+```
+
+Log out and log back in — the refreshed JWT will include `superuser: true` and the Admin link will appear in the navbar.
+
+---
+
 ## Contributing
 
 Submit recipes through the web UI — they go into a pending review queue where

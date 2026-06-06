@@ -26,7 +26,10 @@
 
 <nav class="border-border bg-background border-b px-4 py-3">
 	<div class="mx-auto flex max-w-7xl items-center justify-between">
-		<a href="/" class="text-foreground text-lg font-semibold">RecipeBook</a>
+		<div class="flex items-center gap-6">
+			<a href="/" class="text-foreground text-lg font-semibold">RecipeBook</a>
+			<a href="/games" class="text-muted-foreground hover:text-foreground text-sm transition-colors">Browse</a>
+		</div>
 
 		<div class="flex items-center gap-3">
 			<button
