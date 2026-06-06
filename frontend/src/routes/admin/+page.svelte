@@ -2,19 +2,19 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { isSuperuser } from '$lib/auth';
-	import type { ModPack, Recipe } from '$lib/types';
+	import type { ModPackIdentity, Recipe } from '$lib/types';
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 
-	let modpacks = $state<ModPack[]>([]);
+	let modpacks = $state<ModPackIdentity[]>([]);
 	let pendingCount = $state(0);
 	let loadError = $state('');
 
 	onMount(async () => {
 		try {
 			const [mp, pending] = await Promise.all([
-				api.get<ModPack[]>('/modpacks'),
+				api.get<ModPackIdentity[]>('/modpacks'),
 				api.get<{ items: Recipe[]; total: number }>('/recipes/pending?limit=1')
 			]);
 			modpacks = mp;
@@ -55,14 +55,11 @@
 		{#each modpacks as mp (mp.id)}
 			<Card.Root>
 				<Card.Header>
-					<div class="flex items-center justify-between">
-						<Card.Title class="text-base">{mp.name}</Card.Title>
-						<Badge variant={mp.status === 'published' ? 'default' : 'secondary'}>{mp.status}</Badge>
-					</div>
-					<Card.Description>v{mp.version}</Card.Description>
+					<Card.Title class="text-base">{mp.name}</Card.Title>
+					<Card.Description class="font-mono">{mp.slug}</Card.Description>
 				</Card.Header>
 				<Card.Footer>
-					<Button variant="outline" href="/admin/modpacks/{mp.id}" class="w-full">Manage</Button>
+					<Button variant="outline" href="/admin/modpacks/{mp.id}" class="w-full">Manage versions</Button>
 				</Card.Footer>
 			</Card.Root>
 		{/each}

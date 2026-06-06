@@ -68,8 +68,8 @@ class Recipe(TimestampMixin, table=True):
 
     # Priority for override resolution
     source_priority: int = Field(default=SourcePriority.MOD)
-    # Which modpack this recipe was imported from (null = from a mod directly)
-    modpack_id: uuid.UUID | None = Field(default=None, foreign_key="modpacks.id")
+    # Which modpack version this recipe was imported from (null = from a mod directly)
+    modpack_version_id: uuid.UUID | None = Field(default=None, foreign_key="modpack_versions.id")
     # Contributor for community-entered recipes
     contributor_id: uuid.UUID | None = Field(default=None, foreign_key="users.id")
 
@@ -183,7 +183,7 @@ class RecipeOverride(TimestampMixin, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     base_recipe_id: uuid.UUID = Field(foreign_key="recipes.id", index=True)
     override_recipe_id: uuid.UUID = Field(foreign_key="recipes.id", index=True)
-    modpack_id: uuid.UUID = Field(foreign_key="modpacks.id", index=True)
+    modpack_version_id: uuid.UUID = Field(foreign_key="modpack_versions.id", index=True)
     # Why this override exists — from KubeJS comments, curator notes, etc.
     notes: str | None = None
 
@@ -209,8 +209,8 @@ class RecipeRead(SQLModel):
     recipe_type: str
     import_key: str
     source_priority: int
-    modpack_id: uuid.UUID | None
     contributor_id: uuid.UUID | None
+    modpack_version_id: uuid.UUID | None
     time_ticks: int | None
     energy_rf: int | None
     conditions_met: bool

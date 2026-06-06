@@ -42,7 +42,9 @@ from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
 from app.models.status import PublicationStatus
 from app.models.versioning import (
     Game, GameCreate, GameRead, GameVersion, GameVersionCreate, GameVersionRead,
-    Mod, ModCreate, ModRead, ModPack, ModPackCreate, ModPackRead,
+    Mod, ModCreate, ModRead,
+    ModPackIdentity, ModPackIdentityCreate, ModPackIdentityRead,
+    ModPackVersion, ModPackVersionCreate, ModPackVersionRead,
     ModPackModVersion, ModVersion, ModVersionCreate, ModVersionRead,
 )
 
@@ -240,121 +242,180 @@ async def create_mod_version(
     return mv
 
 
-# ── ModPacks ──────────────────────────────────────────────────────────────────
+# ── ModPack Identities ────────────────────────────────────────────────────────
 
-@router.get("/modpacks", response_model=list[ModPackRead])
-async def list_modpacks(
+def _build_mpv_read(mpv: ModPackVersion, identity: ModPackIdentity) -> ModPackVersionRead:
+    return ModPackVersionRead(
+        id=mpv.id,
+        identity_id=mpv.identity_id,
+        game_version_id=mpv.game_version_id,
+        name=identity.name,
+        slug=identity.slug,
+        version=mpv.version,
+        status=mpv.status,
+        icon_url=mpv.icon_url or identity.icon_url,
+        source_url=identity.source_url,
+        description=identity.description,
+    )
+
+
+@router.get("/modpacks", response_model=list[ModPackIdentityRead])
+async def list_modpack_identities(
     session: Session,
-    game_version_id: uuid.UUID | None = None,
     game_id: uuid.UUID | None = None,
     token: TokenData | None = Depends(_optional_token),
-) -> list[ModPack]:
-    q = select(ModPack).order_by(ModPack.name, ModPack.version)
-    if game_version_id:
-        q = q.where(ModPack.game_version_id == game_version_id)
-    elif game_id:
-        gvs = await session.exec(select(GameVersion).where(GameVersion.game_id == game_id))
-        gv_ids = [gv.id for gv in gvs.scalars().all()]
-        q = q.where(ModPack.game_version_id.in_(gv_ids))
-
-    is_admin = token and token.is_superuser
-    if not is_admin:
-        q = q.where(ModPack.status == PublicationStatus.PUBLISHED)
-
+) -> list[ModPackIdentity]:
+    q = select(ModPackIdentity).order_by(ModPackIdentity.name)
+    if game_id:
+        q = q.where(ModPackIdentity.game_id == game_id)
     result = await session.exec(q)
     return list(result.scalars().all())
 
 
-@router.post("/modpacks", response_model=ModPackRead, status_code=status.HTTP_201_CREATED)
-async def create_modpack(body: ModPackCreate, session: Session, token: Token) -> ModPack:
+@router.post("/modpacks", response_model=ModPackIdentityRead, status_code=status.HTTP_201_CREATED)
+async def create_modpack_identity(
+    body: ModPackIdentityCreate, session: Session, token: Token,
+) -> ModPackIdentity:
     _require_superuser(token)
+    game = await session.get(Game, body.game_id)
+    if not game:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Game not found")
+    existing = await session.exec(
+        select(ModPackIdentity).where(
+            ModPackIdentity.game_id == body.game_id,
+            ModPackIdentity.slug == body.slug,
+        )
+    )
+    if existing.scalars().one_or_none():
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Modpack slug '{body.slug}' already exists for this game")
+    identity = ModPackIdentity(**body.model_dump())
+    session.add(identity)
+    await session.commit()
+    await session.refresh(identity)
+    return identity
+
+
+@router.get("/modpacks/{identity_id}", response_model=ModPackIdentityRead)
+async def get_modpack_identity(identity_id: uuid.UUID, session: Session) -> ModPackIdentity:
+    identity = await session.get(ModPackIdentity, identity_id)
+    if not identity:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+    return identity
+
+
+@router.get("/modpacks/{identity_id}/versions", response_model=list[ModPackVersionRead])
+async def list_modpack_versions(
+    identity_id: uuid.UUID,
+    session: Session,
+    token: TokenData | None = Depends(_optional_token),
+) -> list[ModPackVersionRead]:
+    identity = await session.get(ModPackIdentity, identity_id)
+    if not identity:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+
+    q = select(ModPackVersion).where(ModPackVersion.identity_id == identity_id)
+    is_admin = token and token.is_superuser
+    if not is_admin:
+        q = q.where(ModPackVersion.status == PublicationStatus.PUBLISHED)
+    result = await session.exec(q.order_by(ModPackVersion.version))
+    return [_build_mpv_read(v, identity) for v in result.scalars().all()]
+
+
+@router.post("/modpacks/{identity_id}/versions",
+             response_model=ModPackVersionRead,
+             status_code=status.HTTP_201_CREATED)
+async def create_modpack_version(
+    identity_id: uuid.UUID,
+    body: ModPackVersionCreate,
+    session: Session,
+    token: Token,
+) -> ModPackVersionRead:
+    _require_superuser(token)
+    identity = await session.get(ModPackIdentity, identity_id)
+    if not identity:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
     gv = await session.get(GameVersion, body.game_version_id)
     if not gv:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "GameVersion not found")
-    mp = ModPack(**body.model_dump())
-    session.add(mp)
+    mpv = ModPackVersion(identity_id=identity_id, **body.model_dump())
+    session.add(mpv)
     await session.commit()
-    await session.refresh(mp)
-    return mp
+    await session.refresh(mpv)
+    return _build_mpv_read(mpv, identity)
 
 
-@router.get("/modpacks/{modpack_id}", response_model=ModPackRead)
-async def get_modpack(
-    modpack_id: uuid.UUID,
-    session: Session,
-    token: TokenData | None = Depends(_optional_token),
-) -> ModPack:
-    mp = await session.get(ModPack, modpack_id)
-    if not mp:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+# ── ModPack Versions (specific release endpoints) ─────────────────────────────
 
+async def _get_modpack_version(
+    session: AsyncSession,
+    modpack_version_id: uuid.UUID,
+    token: TokenData | None = None,
+) -> tuple[ModPackVersion, ModPackIdentity]:
+    mpv = await session.get(ModPackVersion, modpack_version_id)
+    if not mpv:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack version not found")
+    identity = await session.get(ModPackIdentity, mpv.identity_id)
     is_admin = token and (
         token.is_superuser
-        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
+        or await is_modpack_admin(session, token.user_id, modpack_version_id, AdminRole.MAINTAINER)
     )
-    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
+    if not is_admin and mpv.status != PublicationStatus.PUBLISHED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack version not found")
+    return mpv, identity
 
-    return mp
+
+@router.get("/modpack-versions/{modpack_version_id}", response_model=ModPackVersionRead)
+async def get_modpack_version(
+    modpack_version_id: uuid.UUID,
+    session: Session,
+    token: TokenData | None = Depends(_optional_token),
+) -> ModPackVersionRead:
+    mpv, identity = await _get_modpack_version(session, modpack_version_id, token)
+    return _build_mpv_read(mpv, identity)
 
 
-@router.post("/modpacks/{modpack_id}/mod-versions",
+@router.post("/modpack-versions/{modpack_version_id}/mod-versions",
              status_code=status.HTTP_204_NO_CONTENT)
-async def add_mod_version_to_modpack(
-    modpack_id: uuid.UUID,
+async def add_mod_version_to_modpack_version(
+    modpack_version_id: uuid.UUID,
     mod_version_id: uuid.UUID,
     session: Session,
     token: Token,
 ) -> None:
-    """Link a ModVersion into a ModPack."""
-    mp = await session.get(ModPack, modpack_id)
-    if not mp:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-
+    """Link a ModVersion into a ModPackVersion."""
+    mpv = await session.get(ModPackVersion, modpack_version_id)
+    if not mpv:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack version not found")
     if not token.is_superuser:
-        ok = await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
+        ok = await is_modpack_admin(session, token.user_id, modpack_version_id, AdminRole.MAINTAINER)
         if not ok:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "ModPack admin required")
-
     mv = await session.get(ModVersion, mod_version_id)
     if not mv:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ModVersion not found")
-
-    existing = await session.get(ModPackModVersion, (modpack_id, mod_version_id))
+    existing = await session.get(ModPackModVersion, (modpack_version_id, mod_version_id))
     if existing:
-        raise HTTPException(status.HTTP_409_CONFLICT, "ModVersion already in ModPack")
-
-    link = ModPackModVersion(modpack_id=modpack_id, mod_version_id=mod_version_id)
-    session.add(link)
+        raise HTTPException(status.HTTP_409_CONFLICT, "ModVersion already in this ModPack version")
+    session.add(ModPackModVersion(modpack_id=modpack_version_id, mod_version_id=mod_version_id))
     await session.commit()
 
 
-# ── ModPack mod listing ───────────────────────────────────────────────────────
+# ── ModPack version sub-resources ─────────────────────────────────────────────
 
 class ModPackModEntry(SQLModel):
     mod: ModRead
     mod_version: ModVersionRead
 
 
-@router.get("/modpacks/{modpack_id}/mods", response_model=list[ModPackModEntry])
-async def list_modpack_mods(
-    modpack_id: uuid.UUID,
+@router.get("/modpack-versions/{modpack_version_id}/mods", response_model=list[ModPackModEntry])
+async def list_modpack_version_mods(
+    modpack_version_id: uuid.UUID,
     session: Session,
     token: TokenData | None = Depends(_optional_token),
 ) -> list[ModPackModEntry]:
-    mp = await session.get(ModPack, modpack_id)
-    if not mp:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-
-    is_admin = token and (
-        token.is_superuser
-        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
-    )
-    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-
+    mpv, _ = await _get_modpack_version(session, modpack_version_id, token)
     links_result = await session.exec(
-        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_version_id)
     )
     entries: list[ModPackModEntry] = []
     for link in links_result.scalars().all():
@@ -372,26 +433,16 @@ async def list_modpack_mods(
     return entries
 
 
-@router.get("/modpacks/{modpack_id}/machines", response_model=list[MachineIdentityRead])
-async def list_modpack_machines(
-    modpack_id: uuid.UUID,
+@router.get("/modpack-versions/{modpack_version_id}/machines", response_model=list[MachineIdentityRead])
+async def list_modpack_version_machines(
+    modpack_version_id: uuid.UUID,
     session: Session,
     token: TokenData | None = Depends(_optional_token),
 ) -> list[MachineIdentity]:
-    mp = await session.get(ModPack, modpack_id)
-    if not mp:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-    is_admin = token and (
-        token.is_superuser
-        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
-    )
-    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-
-    gv = await session.get(GameVersion, mp.game_version_id)
-
+    mpv, _ = await _get_modpack_version(session, modpack_version_id, token)
+    gv = await session.get(GameVersion, mpv.game_version_id)
     links_result = await session.exec(
-        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_version_id)
     )
     namespaces: set[str] = set()
     for link in links_result.scalars().all():
@@ -400,7 +451,6 @@ async def list_modpack_machines(
             mod = await session.get(Mod, mv.mod_id)
             if mod:
                 namespaces.add(mod.namespace)
-
     game_machines_result = await session.exec(
         select(MachineIdentity).where(MachineIdentity.game_id == gv.game_id)
     )
@@ -411,27 +461,18 @@ async def list_modpack_machines(
     return sorted(machines, key=lambda m: m.name)
 
 
-@router.get("/modpacks/{modpack_id}/items", response_model=list[ItemAppearanceWithIdentityRead])
-async def list_modpack_items(
-    modpack_id: uuid.UUID,
+@router.get("/modpack-versions/{modpack_version_id}/items", response_model=list[ItemAppearanceWithIdentityRead])
+async def list_modpack_version_items(
+    modpack_version_id: uuid.UUID,
     session: Session,
     search: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     token: TokenData | None = Depends(_optional_token),
 ) -> list[ItemAppearanceWithIdentityRead]:
-    mp = await session.get(ModPack, modpack_id)
-    if not mp:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-    is_admin = token and (
-        token.is_superuser
-        or await is_modpack_admin(session, token.user_id, modpack_id, AdminRole.MAINTAINER)
-    )
-    if not is_admin and mp.status != PublicationStatus.PUBLISHED:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-
+    mpv, _ = await _get_modpack_version(session, modpack_version_id, token)
     links_result = await session.exec(
-        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_id)
+        select(ModPackModVersion).where(ModPackModVersion.modpack_id == modpack_version_id)
     )
     mv_ids = [link.mod_version_id for link in links_result.scalars().all()]
     if not mv_ids:

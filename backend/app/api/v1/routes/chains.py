@@ -1,36 +1,16 @@
 """
-Chain traversal endpoint.
+Chain traversal endpoint — spec: docs/chain_query_spec.md
 
-Find all recipe sequences that transform a starting item/tag into a target
-item/tag, ranked by output quantity per single unit of input.
+  GET /chains?modpack_id=<uuid>&target=c:ingots/gold&start=c:ores/gold
 
-Works for any item, not just ores→ingots. Examples:
-  raw_ore → ingot, dust → plate, ore → gem, log → planks, etc.
+Direction is determined by whether `start` is provided:
+  start present  → forward DFS:  start → consuming recipes → target
+                   ranked by yield_per_start_item (descending)
+  start absent   → backward DFS: target ← producing recipes ← raw materials
+                   ranked by raw_materials_per_target (ascending)
 
-  GET /chains?modpack_slug=atm10&modpack_version=0.18.0
-             &start_tag=c:ores/gold&target_tag=c:ingots/gold
-  GET /chains?modpack_id=<uuid>&start_item=minecraft:gold_ore&target_tag=c:ingots/gold
-  GET /chains?game_version_id=<uuid>&start_tag=c:ores/gold&target_tag=c:ingots/gold
-  GET /chains?game_id=<uuid>&start_tag=c:ores/gold&target_tag=c:ingots/gold
-
-Query parameters:
-  Scope (one required — most specific wins):
-    modpack_id                       — single modpack by UUID
-    modpack_slug + modpack_version   — single modpack by slug/version
-    game_version_id                  — all published modpacks for a game version
-    game_id                          — all published modpacks for a game
-
-  Start (one required):
-    start_tag    — tag that resolves to starting items, e.g. "c:ores/gold"
-    start_item   — concrete item_id to start from, e.g. "minecraft:gold_ore"
-
-  Target (one required):
-    target_tag   — chain succeeds when any output belongs to this tag
-    target_item  — chain succeeds when this specific item_id is produced
-
-  Optional:
-    max_depth    — maximum chain length (default 7, max 12)
-    min_yield    — only return chains with output_quantity >= this (default 0)
+Both start and target accept either a concrete item_id ("mekanism:dust_gold")
+or a tag prefixed with "#" ("#c:ingots/gold").
 """
 from __future__ import annotations
 
@@ -46,10 +26,13 @@ from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_session
-from app.models.identity import ItemAppearance, MachineIdentity
+from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
+from app.models.status import RecipeStatus
 from app.models.status import PublicationStatus
-from app.models.versioning import Game, GameVersion, ModPack, ModPackModVersion, ModVersion
+from app.models.versioning import (
+    Game, GameVersion, Mod, ModPackIdentity, ModPackVersion, ModPackModVersion, ModVersion,
+)
 
 router = APIRouter(prefix="/chains", tags=["chains"])
 
@@ -66,17 +49,39 @@ class _Slot:
 
 
 @dataclass
+class _MachineInfo:
+    id: str
+    name: str
+
+
+@dataclass
 class _Recipe:
     id: uuid.UUID
     recipe_type: str
-    machine_name: str
+    machine: _MachineInfo
     import_key: str
+    time_ticks: int | None
+    energy_rf: int | None
     inputs: list[_Slot] = field(default_factory=list)
     outputs: list[_Slot] = field(default_factory=list)
     aux_inputs: list[_Slot] = field(default_factory=list)
 
 
-# ── DB data loading ───────────────────────────────────────────────────────────
+# ── Exclude filter ────────────────────────────────────────────────────────────
+
+def _is_excluded(recipe: _Recipe, exclude: list[str]) -> bool:
+    rt = recipe.recipe_type
+    for rule in exclude:
+        if ":" in rule:
+            if rt == rule:
+                return True
+        else:
+            if rt.startswith(rule + ":"):
+                return True
+    return False
+
+
+# ── DB loading ────────────────────────────────────────────────────────────────
 
 async def _mod_version_ids_for_modpack(
     session: AsyncSession, modpack_id: uuid.UUID
@@ -87,61 +92,44 @@ async def _mod_version_ids_for_modpack(
     return {link.mod_version_id for link in result.scalars().all()}
 
 
-async def _mod_version_ids_for_game_version(
-    session: AsyncSession, game_version_id: uuid.UUID
-) -> set[uuid.UUID]:
-    mp_result = await session.exec(
-        select(ModPack).where(
-            ModPack.game_version_id == game_version_id,
-            ModPack.status == PublicationStatus.PUBLISHED,
-        )
-    )
-    ids: set[uuid.UUID] = set()
-    for mp in mp_result.scalars().all():
-        ids |= await _mod_version_ids_for_modpack(session, mp.id)
-    return ids
-
-
-async def _mod_version_ids_for_game(
-    session: AsyncSession, game_id: uuid.UUID
-) -> set[uuid.UUID]:
-    gv_result = await session.exec(
-        select(GameVersion).where(GameVersion.game_id == game_id)
-    )
-    ids: set[uuid.UUID] = set()
-    for gv in gv_result.scalars().all():
-        ids |= await _mod_version_ids_for_game_version(session, gv.id)
-    return ids
-
-
 async def _load_recipe_graph(
     session: AsyncSession,
     mod_version_ids: set[uuid.UUID],
-) -> tuple[list[_Recipe], dict[str, set[str]], dict[str, set[str]]]:
+) -> tuple[list[_Recipe], dict[str, set[str]], dict[str, str]]:
     """
-    Load all recipes active for the given mod_version_ids from the DB.
+    Load approved recipes for the given mod_version_ids.
 
     Returns:
-      recipes       — in-memory recipe objects with slots populated
-      tag_to_items  — tag string → set of item_ids
-      item_to_tags  — item_id → set of tags it belongs to
+      recipes            — in-memory recipe objects
+      tag_to_items       — tag string → set of item_ids
+      item_to_canonical  — item_id → canonical_name
     """
-
     if not mod_version_ids:
         return [], {}, {}
 
     appearance_result = await session.exec(
         select(ItemAppearance).where(ItemAppearance.mod_version_id.in_(mod_version_ids))
     )
-    tag_to_items: dict[str, set[str]] = defaultdict(set)
-    item_to_tags: dict[str, set[str]] = defaultdict(set)
-    appearance_id_to_item: dict[uuid.UUID, str] = {}
+    appearances = list(appearance_result.scalars().all())
 
-    for app in appearance_result.scalars().all():
+    tag_to_items: dict[str, set[str]] = defaultdict(set)
+    appearance_id_to_item: dict[uuid.UUID, str] = {}
+    for app in appearances:
         appearance_id_to_item[app.id] = app.item_id
         for tag in (json.loads(app.tags_json) if app.tags_json else []):
             tag_to_items[tag].add(app.item_id)
-            item_to_tags[app.item_id].add(tag)
+
+    # Resolve canonical names
+    identity_ids = {a.identity_id for a in appearances}
+    item_to_canonical: dict[str, str] = {}
+    if identity_ids:
+        identity_result = await session.exec(
+            select(ItemIdentity).where(ItemIdentity.id.in_(identity_ids))
+        )
+        identity_map = {i.id: i.canonical_name for i in identity_result.scalars().all()}
+        for app in appearances:
+            if app.identity_id in identity_map:
+                item_to_canonical[app.item_id] = identity_map[app.identity_id]
 
     link_result = await session.exec(
         select(RecipeModVersionLink).where(
@@ -149,22 +137,27 @@ async def _load_recipe_graph(
         )
     )
     recipe_ids = {link.recipe_id for link in link_result.scalars().all()}
-
     if not recipe_ids:
-        return [], dict(tag_to_items), dict(item_to_tags)
+        return [], dict(tag_to_items), item_to_canonical
 
     machine_result = await session.exec(select(MachineIdentity))
-    machine_id_to_name: dict[uuid.UUID, str] = {
-        m.id: m.name for m in machine_result.scalars().all()
+    machine_map: dict[uuid.UUID, _MachineInfo] = {
+        m.id: _MachineInfo(id=str(m.id), name=m.name)
+        for m in machine_result.scalars().all()
     }
 
+    # Only approved recipes participate in traversal
     recipe_result = await session.exec(
-        select(Recipe).where(Recipe.id.in_(recipe_ids))
+        select(Recipe).where(
+            Recipe.id.in_(recipe_ids),
+            Recipe.status == RecipeStatus.APPROVED,
+        )
     )
     db_recipes = list(recipe_result.scalars().all())
+    approved_ids = {r.id for r in db_recipes}
 
     slot_result = await session.exec(
-        select(RecipeSlot).where(RecipeSlot.recipe_id.in_(recipe_ids))
+        select(RecipeSlot).where(RecipeSlot.recipe_id.in_(approved_ids))
     )
     slots_by_recipe: dict[uuid.UUID, list[RecipeSlot]] = defaultdict(list)
     for slot in slot_result.scalars().all():
@@ -172,15 +165,25 @@ async def _load_recipe_graph(
 
     recipes: list[_Recipe] = []
     for db_r in db_recipes:
+        rt = db_r.recipe_type
+        machine = machine_map.get(
+            db_r.machine_identity_id,
+            _MachineInfo(id=str(db_r.machine_identity_id), name=rt),
+        )
         r = _Recipe(
             id=db_r.id,
-            recipe_type=db_r.recipe_type,
-            machine_name=machine_id_to_name.get(db_r.machine_identity_id, db_r.recipe_type),
+            recipe_type=rt,
+            machine=machine,
             import_key=db_r.import_key,
+            time_ticks=db_r.time_ticks,
+            energy_rf=db_r.energy_rf,
         )
         for db_slot in sorted(slots_by_recipe[db_r.id], key=lambda s: s.slot_order):
-            item_id = appearance_id_to_item.get(db_slot.item_appearance_id) \
-                if db_slot.item_appearance_id else None
+            item_id = (
+                appearance_id_to_item.get(db_slot.item_appearance_id)
+                if db_slot.item_appearance_id
+                else None
+            )
             slot = _Slot(
                 item_id=item_id,
                 tag_string=db_slot.tag_string,
@@ -188,31 +191,32 @@ async def _load_recipe_graph(
                 is_fluid=db_slot.is_fluid,
                 fluid_label=db_slot.fluid_label,
             )
-            target = r.inputs if db_slot.slot_type == "input" \
-                else (r.outputs if db_slot.slot_type == "output" else r.aux_inputs)
-            target.append(slot)
+            if db_slot.slot_type == "input":
+                r.inputs.append(slot)
+            elif db_slot.slot_type == "output":
+                r.outputs.append(slot)
+            else:
+                r.aux_inputs.append(slot)
         recipes.append(r)
 
-    return recipes, dict(tag_to_items), dict(item_to_tags)
+    return recipes, dict(tag_to_items), item_to_canonical
 
 
 # ── Graph index ───────────────────────────────────────────────────────────────
 
 class _RecipeGraph:
-    def __init__(
-        self,
-        recipes: list[_Recipe],
-        tag_to_items: dict[str, set[str]],
-    ):
+    def __init__(self, recipes: list[_Recipe], tag_to_items: dict[str, set[str]]):
         self.tag_to_items = tag_to_items
         self._by_input: dict[str, list[_Recipe]] = defaultdict(list)
         self._by_output: dict[str, list[_Recipe]] = defaultdict(list)
 
         for r in recipes:
+            # Index by outputs (backward traversal)
             for slot in r.outputs:
                 if slot.item_id:
                     self._by_output[slot.item_id].append(r)
 
+            # Index only by the primary (first non-fluid) input (forward traversal)
             primary = next((s for s in r.inputs if not s.is_fluid), None)
             if primary:
                 if primary.item_id:
@@ -224,171 +228,570 @@ class _RecipeGraph:
     def recipes_consuming(self, item_id: str) -> list[_Recipe]:
         return self._by_input.get(item_id, [])
 
+    def recipes_producing(self, item_id: str) -> list[_Recipe]:
+        return self._by_output.get(item_id, [])
 
-# ── DFS chain finder ──────────────────────────────────────────────────────────
 
-def _find_chains(
+# ── Tag / item resolution ─────────────────────────────────────────────────────
+
+def _resolve(value: str, tag_to_items: dict[str, set[str]]) -> list[str]:
+    if value.startswith("#"):
+        return list(tag_to_items.get(value[1:], set()))
+    return [value]
+
+
+# ── Forward DFS ───────────────────────────────────────────────────────────────
+# Each chain: list of (recipe, runs) in execution order.
+# `runs` = how many times that recipe runs, starting from 1.0 unit of start_item.
+
+def _forward_dfs(
     start_items: list[str],
-    target_items: set[str],       # concrete item_ids that count as "success"
+    target_items: set[str],
     graph: _RecipeGraph,
+    exclude: list[str],
     max_depth: int,
-) -> list[list[tuple[_Recipe, float, float]]]:
-    """
-    DFS from start_items until any current item is in target_items.
-    Returns a list of chains; each chain is [(recipe, input_qty, output_qty)].
-    """
-    all_chains: list[list[tuple[_Recipe, float, float]]] = []
+    allow_cycles: bool,
+) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None]], int]:
+    all_chains: list[tuple[list, bool, int | None]] = []
+    cycles_excluded = 0
 
     def dfs(
-        current_items: list[str],
-        current_count: float,
-        steps: list[tuple[_Recipe, float, float]],
+        item_id: str,
+        quantity: float,
+        steps: list[tuple[_Recipe, float]],
+        path: frozenset[str],
         depth: int,
-        seen: frozenset[uuid.UUID],
     ) -> None:
+        nonlocal cycles_excluded
+
         if depth > max_depth:
             return
 
-        for ci in current_items:
-            if ci in target_items:
-                if steps:
-                    all_chains.append(list(steps))
-                return
+        if item_id in target_items:
+            all_chains.append((list(steps), False, None))
+            return
 
+        if item_id in path:
+            if allow_cycles:
+                all_chains.append((list(steps), True, depth))
+            else:
+                cycles_excluded += 1
+            return
+
+        new_path = path | {item_id}
         tried: set[uuid.UUID] = set()
-        for ci in current_items:
-            for recipe in graph.recipes_consuming(ci):
-                if recipe.id in seen or recipe.id in tried:
+
+        for recipe in graph.recipes_consuming(item_id):
+            if recipe.id in tried or _is_excluded(recipe, exclude):
+                continue
+            tried.add(recipe.id)
+
+            primary = next((s for s in recipe.inputs if not s.is_fluid), None)
+            if not primary:
+                continue
+            runs = quantity / (primary.quantity or 1.0)
+
+            for out_slot in recipe.outputs:
+                if not out_slot.item_id or out_slot.is_fluid:
                     continue
-                tried.add(recipe.id)
-
-                primary = next((s for s in recipe.inputs if not s.is_fluid), None)
-                runs = current_count / (primary.quantity if primary else 1.0)
-
-                next_items_counts = [
-                    (out.item_id, out.quantity * runs)
-                    for out in recipe.outputs
-                    if out.item_id
-                ]
-                if not next_items_counts:
-                    continue
-
-                primary_item, primary_qty = next_items_counts[0]
                 dfs(
-                    current_items=[item for item, _ in next_items_counts],
-                    current_count=primary_qty,
-                    steps=steps + [(recipe, current_count, primary_qty)],
-                    depth=depth + 1,
-                    seen=seen | {recipe.id},
+                    out_slot.item_id,
+                    out_slot.quantity * runs,
+                    steps + [(recipe, runs)],
+                    new_path,
+                    depth + 1,
                 )
 
     for item in start_items:
-        dfs([item], 1.0, [], 0, frozenset())
+        dfs(item, 1.0, [], frozenset(), 0)
 
-    return all_chains
+    return all_chains, cycles_excluded
 
 
-def _deduplicate(
-    chains: list[list[tuple[_Recipe, float, float]]],
-) -> list[list[tuple[_Recipe, float, float]]]:
-    seen: dict[tuple, list[tuple[_Recipe, float, float]]] = {}
-    for chain in chains:
-        key = (
-            tuple((r.recipe_type, r.import_key) for r, _, _ in chain),
-            round(chain[-1][2], 4),
-        )
-        seen.setdefault(key, chain)
+# ── Backward DFS ──────────────────────────────────────────────────────────────
+# Traces target ← producing recipes ← raw materials.
+# Each chain is stored reversed (from target-producer toward raw), then reversed
+# at the leaf so the returned list is in forward (execution) order.
+# Each entry: (steps_forward, has_cycle, cycle_at_step, raw_item_id, raw_qty)
+
+def _backward_dfs(
+    target_items: list[str],
+    graph: _RecipeGraph,
+    exclude: list[str],
+    max_depth: int,
+    allow_cycles: bool,
+) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None, str, float]], int]:
+    all_chains: list[tuple[list, bool, int | None, str, float]] = []
+    cycles_excluded = 0
+
+    def dfs(
+        item_id: str,
+        quantity: float,
+        steps_rev: list[tuple[_Recipe, float]],
+        path: frozenset[str],
+        depth: int,
+    ) -> None:
+        nonlocal cycles_excluded
+
+        if depth > max_depth:
+            return
+
+        if item_id in path:
+            if allow_cycles:
+                all_chains.append((list(reversed(steps_rev)), True, depth, item_id, quantity))
+            else:
+                cycles_excluded += 1
+            return
+
+        producing = [r for r in graph.recipes_producing(item_id) if not _is_excluded(r, exclude)]
+
+        if not producing:
+            # Leaf — item_id is a raw material
+            all_chains.append((list(reversed(steps_rev)), False, None, item_id, quantity))
+            return
+
+        new_path = path | {item_id}
+
+        for recipe in producing:
+            out_slot = next((s for s in recipe.outputs if s.item_id == item_id), None)
+            if not out_slot:
+                continue
+
+            runs = quantity / (out_slot.quantity or 1.0)
+
+            for in_slot in recipe.inputs:
+                if in_slot.is_fluid:
+                    continue
+
+                if in_slot.item_id:
+                    input_items = [in_slot.item_id]
+                elif in_slot.tag_string:
+                    input_items = list(graph.tag_to_items.get(in_slot.tag_string, set()))
+                else:
+                    continue
+
+                for input_item in input_items:
+                    dfs(
+                        input_item,
+                        in_slot.quantity * runs,
+                        steps_rev + [(recipe, runs)],
+                        new_path,
+                        depth + 1,
+                    )
+
+    for item in target_items:
+        dfs(item, 1.0, [], frozenset(), 0)
+
+    return all_chains, cycles_excluded
+
+
+# ── Deduplication ─────────────────────────────────────────────────────────────
+
+def _dedup_forward(
+    chains: list[tuple[list, bool, int | None]],
+) -> list[tuple[list, bool, int | None]]:
+    seen: dict[tuple, tuple] = {}
+    for chain, has_cycle, cycle_step in chains:
+        key = tuple((r.import_key, round(runs, 6)) for r, runs in chain)
+        seen.setdefault(key, (chain, has_cycle, cycle_step))
     return list(seen.values())
 
 
-def _serialize_chain(chain: list[tuple[_Recipe, float, float]]) -> dict:
+def _dedup_backward(
+    chains: list[tuple[list, bool, int | None, str, float]],
+) -> list[tuple[list, bool, int | None, str, float]]:
+    seen: dict[tuple, tuple] = {}
+    for entry in chains:
+        chain, has_cycle, cycle_step, raw_item, raw_qty = entry
+        key = tuple((r.import_key, round(runs, 6)) for r, runs in chain) + (raw_item,)
+        seen.setdefault(key, entry)
+    return list(seen.values())
+
+
+# ── Serialization ─────────────────────────────────────────────────────────────
+
+def _serialize_forward_chain(
+    steps: list[tuple[_Recipe, float]],
+    target_items: set[str],
+    item_to_canonical: dict[str, str],
+    quantity_scale: float,
+    has_cycle: bool,
+    cycle_at_step: int | None,
+    rank: int,
+) -> dict[str, Any]:
+    # raw_inputs: non-fluid inputs of step 1
+    recipe0, runs0 = steps[0]
+    raw_inputs = [
+        {
+            "tag": s.tag_string,
+            "item_id": s.item_id,
+            "quantity": s.quantity * runs0 * quantity_scale,
+            "is_fluid": False,
+        }
+        for s in recipe0.inputs
+        if not s.is_fluid
+    ]
+
+    # final_outputs: target-matching outputs of last step
+    recipe_last, runs_last = steps[-1]
+    final_outputs = []
+    yield_per_start = 0.0
+    for s in recipe_last.outputs:
+        if s.item_id and s.item_id in target_items:
+            qty = s.quantity * runs_last * quantity_scale
+            yield_per_start += qty
+            final_outputs.append({
+                "item_id": s.item_id,
+                "canonical_name": item_to_canonical.get(s.item_id),
+                "quantity": qty,
+            })
+
+    return _build_chain_dict(
+        steps=steps,
+        item_to_canonical=item_to_canonical,
+        quantity_scale=quantity_scale,
+        rank=rank,
+        has_cycle=has_cycle,
+        cycle_at_step=cycle_at_step,
+        yield_per_start_item=yield_per_start if not has_cycle else None,
+        raw_materials_per_target=None,
+        raw_inputs=raw_inputs,
+        final_outputs=final_outputs,
+    )
+
+
+def _serialize_backward_chain(
+    steps: list[tuple[_Recipe, float]],
+    target_items: set[str],
+    item_to_canonical: dict[str, str],
+    quantity_scale: float,
+    has_cycle: bool,
+    cycle_at_step: int | None,
+    raw_item_id: str,
+    raw_qty: float,
+    rank: int,
+) -> dict[str, Any]:
+    raw_inputs = [
+        {
+            "tag": None,
+            "item_id": raw_item_id,
+            "quantity": raw_qty * quantity_scale,
+            "is_fluid": False,
+        }
+    ]
+
+    # final_outputs: target outputs of last step
+    final_outputs = []
+    if steps:
+        recipe_last, runs_last = steps[-1]
+        for s in recipe_last.outputs:
+            if s.item_id and s.item_id in target_items:
+                final_outputs.append({
+                    "item_id": s.item_id,
+                    "canonical_name": item_to_canonical.get(s.item_id),
+                    "quantity": s.quantity * runs_last * quantity_scale,
+                })
+
+    return _build_chain_dict(
+        steps=steps,
+        item_to_canonical=item_to_canonical,
+        quantity_scale=quantity_scale,
+        rank=rank,
+        has_cycle=has_cycle,
+        cycle_at_step=cycle_at_step,
+        yield_per_start_item=None,
+        raw_materials_per_target=raw_qty * quantity_scale if not has_cycle else None,
+        raw_inputs=raw_inputs,
+        final_outputs=final_outputs,
+    )
+
+
+def _build_chain_dict(
+    steps: list[tuple[_Recipe, float]],
+    item_to_canonical: dict[str, str],
+    quantity_scale: float,
+    rank: int,
+    has_cycle: bool,
+    cycle_at_step: int | None,
+    yield_per_start_item: float | None,
+    raw_materials_per_target: float | None,
+    raw_inputs: list[dict],
+    final_outputs: list[dict],
+) -> dict[str, Any]:
+    serialized_steps = []
+    machines_seen: dict[str, dict] = {}
     chemicals: list[str] = []
-    steps = []
-    for recipe, in_qty, out_qty in chain:
-        for aux in recipe.aux_inputs:
-            if aux.fluid_label:
-                chemicals.append(aux.fluid_label)
-        mod_namespace = recipe.recipe_type.split(":")[0] if ":" in recipe.recipe_type else ""
-        steps.append({
-            "machine": recipe.machine_name,
-            "mod_namespace": mod_namespace,
+
+    for i, (recipe, runs) in enumerate(steps):
+        mod_ns = recipe.recipe_type.split(":")[0] if ":" in recipe.recipe_type else recipe.recipe_type
+        machine_dict = {
+            "id": recipe.machine.id,
+            "name": recipe.machine.name,
             "recipe_type": recipe.recipe_type,
+            "mod_namespace": mod_ns,
+        }
+        machines_seen.setdefault(recipe.machine.id, machine_dict)
+
+        for aux in recipe.aux_inputs:
+            label = aux.fluid_label or aux.item_id
+            if label:
+                chemicals.append(label)
+
+        step_inputs = [
+            {
+                "tag": s.tag_string,
+                "item_id": s.item_id,
+                "quantity": s.quantity * runs * quantity_scale,
+                "is_fluid": s.is_fluid,
+            }
+            for s in recipe.inputs
+            if not s.is_fluid
+        ]
+        step_outputs = [
+            {
+                "tag": None,
+                "item_id": s.item_id,
+                "canonical_name": item_to_canonical.get(s.item_id or ""),
+                "quantity": s.quantity * runs * quantity_scale,
+                "is_fluid": False,
+            }
+            for s in recipe.outputs
+            if s.item_id
+        ]
+        step_aux = [
+            {
+                "item_id": s.item_id,
+                "canonical_name": item_to_canonical.get(s.item_id or "") if s.item_id else None,
+                "quantity": s.quantity * runs * quantity_scale,
+                "is_fluid": True,
+            }
+            for s in recipe.aux_inputs
+        ]
+
+        serialized_steps.append({
+            "step": i + 1,
+            "machine": machine_dict,
             "recipe_id": str(recipe.id),
-            "input_quantity": in_qty,
-            "output_quantity": out_qty,
-            "inputs": [
-                {"item_id": s.item_id, "tag_string": s.tag_string, "quantity": s.quantity}
-                for s in recipe.inputs if not s.is_fluid
-            ],
-            "outputs": [
-                {"item_id": s.item_id, "quantity": s.quantity}
-                for s in recipe.outputs if not s.is_fluid and s.item_id
-            ],
-            "aux_inputs": [
-                {"label": s.fluid_label or s.item_id, "quantity": s.quantity}
-                for s in recipe.aux_inputs
-            ],
+            "inputs": step_inputs,
+            "outputs": step_outputs,
+            "aux_inputs": step_aux,
+            "time_ticks": recipe.time_ticks,
+            "energy_rf": recipe.energy_rf,
         })
+
     return {
-        "yield_per_input": chain[-1][2],
-        "step_count": len(chain),
-        "machine_sequence": [r.machine_name for r, _, _ in chain],
+        "rank": rank,
+        "yield_per_start_item": yield_per_start_item,
+        "raw_materials_per_target": raw_materials_per_target,
+        "has_cycle": has_cycle,
+        "cycle_at_step": cycle_at_step,
+        "raw_inputs": raw_inputs,
+        "final_outputs": final_outputs,
+        "steps": serialized_steps,
+        "machines_required": list(machines_seen.values()),
         "chemicals_required": sorted(set(chemicals)),
-        "steps": steps,
     }
 
 
-def _normalize_step(step: dict) -> tuple:
-    """I/O signature of a step, independent of which machine performs it."""
-    inputs = frozenset(
-        (s.get("item_id") or s.get("tag_string", ""), round(float(s["quantity"]), 4))
-        for s in step["inputs"]
-    )
-    outputs = frozenset(
-        (s["item_id"], round(float(s["quantity"]), 4))
-        for s in step["outputs"]
-        if s.get("item_id")
-    )
-    aux = frozenset(
-        (s.get("label", ""), round(float(s["quantity"]), 4))
-        for s in step.get("aux_inputs", [])
-    )
-    return (inputs, outputs, aux)
+# ── Scope resolution ──────────────────────────────────────────────────────────
 
-
-def _merge_equivalent_chains(chains: list[dict]) -> list[dict]:
+async def _resolve_scope(
+    session: AsyncSession,
+    modpack: str | None,
+    modpack_version: str | None,
+    mods: list[str],
+    game: str | None,
+    game_version_str: str | None,
+) -> tuple[set[uuid.UUID], dict[str, Any]]:
     """
-    Group chains that are identical except for which machine performs each step.
-    Each step in the output gains a machine_options list [{name, recipe_id}].
+    Tiered priority: modpack > mod[] > game.
+    Returns (mod_version_ids, scope_info).
     """
-    groups: dict[tuple, list[dict]] = {}
-    for chain in chains:
-        key = tuple(_normalize_step(step) for step in chain["steps"])
-        groups.setdefault(key, []).append(chain)
 
-    merged: list[dict] = []
-    for group in groups.values():
-        base = group[0]
-        for step_idx, step in enumerate(base["steps"]):
-            seen: dict[str, dict] = {}  # machine name → option dict
-            for c in group:
-                s = c["steps"][step_idx]
-                if s["machine"] not in seen:
-                    seen[s["machine"]] = {
-                        "name": s["machine"],
-                        "recipe_id": s["recipe_id"],
-                        "mod_namespace": s.get("mod_namespace", ""),
-                    }
-            step["machine_options"] = list(seen.values())
-        if len(group) > 1:
-            base["machine_sequence"] = [
-                " / ".join(dict.fromkeys(
-                    c["steps"][i]["machine"] for c in group
-                ))
-                for i in range(len(base["steps"]))
-            ]
-        merged.append(base)
-    return merged
+    async def _resolve_gv() -> GameVersion | None:
+        if not game:
+            return None
+        try:
+            g = await session.get(Game, uuid.UUID(game))
+        except ValueError:
+            result = await session.exec(select(Game).where(Game.slug == game))
+            g = result.scalars().one_or_none()
+        if not g:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Game '{game}' not found")
+
+        if game_version_str:
+            try:
+                gv = await session.get(GameVersion, uuid.UUID(game_version_str))
+            except ValueError:
+                result = await session.exec(
+                    select(GameVersion).where(
+                        GameVersion.game_id == g.id,
+                        GameVersion.version == game_version_str,
+                    )
+                )
+                gv = result.scalars().one_or_none()
+        else:
+            result = await session.exec(
+                select(GameVersion)
+                .where(GameVersion.game_id == g.id)
+                .order_by(GameVersion.is_latest.desc())
+                .limit(1)
+            )
+            gv = result.scalars().one_or_none()
+        if not gv:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Game version not found")
+        return gv
+
+    # ── Priority 1: modpack ──────────────────────────────────────────────────
+    if modpack:
+        try:
+            identity = await session.get(ModPackIdentity, uuid.UUID(modpack))
+        except ValueError:
+            result = await session.exec(
+                select(ModPackIdentity).where(ModPackIdentity.slug == modpack)
+            )
+            identities = result.scalars().all()
+            if len(identities) > 1:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Modpack slug '{modpack}' is ambiguous across games; add game= to disambiguate",
+                )
+            identity = identities[0] if identities else None
+
+        if not identity:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"ModPack '{modpack}' not found")
+
+        if modpack_version:
+            try:
+                mpv = await session.get(ModPackVersion, uuid.UUID(modpack_version))
+                if mpv and mpv.identity_id != identity.id:
+                    mpv = None
+            except ValueError:
+                result = await session.exec(
+                    select(ModPackVersion).where(
+                        ModPackVersion.identity_id == identity.id,
+                        ModPackVersion.version == modpack_version,
+                    )
+                )
+                mpv = result.scalars().one_or_none()
+        else:
+            result = await session.exec(
+                select(ModPackVersion)
+                .where(
+                    ModPackVersion.identity_id == identity.id,
+                    ModPackVersion.status == PublicationStatus.PUBLISHED,
+                )
+                .order_by(ModPackVersion.version.desc())
+                .limit(1)
+            )
+            mpv = result.scalars().one_or_none()
+            if not mpv:
+                result = await session.exec(
+                    select(ModPackVersion)
+                    .where(ModPackVersion.identity_id == identity.id)
+                    .order_by(ModPackVersion.version.desc())
+                    .limit(1)
+                )
+                mpv = result.scalars().one_or_none()
+
+        if not mpv:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No version found for modpack '{identity.name}'")
+
+        links = await session.exec(
+            select(ModPackModVersion).where(ModPackModVersion.modpack_id == mpv.id)
+        )
+        mv_ids = {lnk.mod_version_id for lnk in links.scalars().all()}
+        return mv_ids, {
+            "type": "modpack",
+            "modpack_identity_id": str(identity.id),
+            "modpack_version_id": str(mpv.id),
+            "modpack_name": identity.name,
+            "modpack_version": mpv.version,
+        }
+
+    # ── Priority 2: mod[] ────────────────────────────────────────────────────
+    if mods:
+        gv = await _resolve_gv()
+        mv_ids: set[uuid.UUID] = set()
+        resolved: list[dict] = []
+
+        for param in mods:
+            mod_ref, _, ver_str = param.partition("@")
+            ver_str = ver_str or None
+
+            try:
+                mod_obj = await session.get(Mod, uuid.UUID(mod_ref))
+            except ValueError:
+                q = select(Mod).where(Mod.slug == mod_ref)
+                if gv:
+                    q = q.where(Mod.game_id == gv.game_id)
+                result = await session.exec(q)
+                mod_obj = result.scalars().one_or_none()
+
+            if not mod_obj:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"Mod '{mod_ref}' not found")
+
+            if ver_str:
+                q = select(ModVersion).where(
+                    ModVersion.mod_id == mod_obj.id, ModVersion.version == ver_str
+                )
+                if gv:
+                    q = q.where(ModVersion.game_version_id == gv.id)
+                result = await session.exec(q)
+                mv = result.scalars().one_or_none()
+            elif gv:
+                result = await session.exec(
+                    select(ModVersion)
+                    .where(ModVersion.mod_id == mod_obj.id, ModVersion.game_version_id == gv.id)
+                    .order_by(ModVersion.imported_at.desc())
+                    .limit(1)
+                )
+                mv = result.scalars().one_or_none()
+            else:
+                result = await session.exec(
+                    select(ModVersion)
+                    .where(
+                        ModVersion.mod_id == mod_obj.id,
+                        ModVersion.status == PublicationStatus.PUBLISHED,
+                    )
+                    .order_by(ModVersion.imported_at.desc())
+                    .limit(1)
+                )
+                mv = result.scalars().one_or_none()
+
+            if not mv:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"No version found for mod '{mod_obj.name}'")
+
+            mv_ids.add(mv.id)
+            resolved.append({"mod": mod_obj.name, "version": mv.version, "mod_version_id": str(mv.id)})
+
+        scope: dict[str, Any] = {"type": "mods", "mods": resolved}
+        if gv:
+            scope["game_version_id"] = str(gv.id)
+        return mv_ids, scope
+
+    # ── Priority 3: game ─────────────────────────────────────────────────────
+    if game:
+        gv = await _resolve_gv()
+        if not gv:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "game= requires a resolvable game version")
+        result = await session.exec(
+            select(ModVersion).where(
+                ModVersion.game_version_id == gv.id,
+                ModVersion.status == PublicationStatus.PUBLISHED,
+            )
+        )
+        mv_ids = {mv.id for mv in result.scalars().all()}
+        return mv_ids, {
+            "type": "game",
+            "game_id": str(gv.game_id),
+            "game_version_id": str(gv.id),
+        }
+
+    raise HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "Provide at least one of: modpack=, mod[]=, game=",
+    )
 
 
 # ── Route ─────────────────────────────────────────────────────────────────────
@@ -396,137 +799,133 @@ def _merge_equivalent_chains(chains: list[dict]) -> list[dict]:
 @router.get("")
 async def get_chains(
     session: AsyncSession = Depends(get_session),
-    # Scope — most specific wins; at least one required
-    modpack_id: uuid.UUID | None = Query(default=None),
-    modpack_slug: str | None = Query(default=None),
-    modpack_version: str | None = Query(default=None),
-    mod_version_id: list[uuid.UUID] = Query(default=[]),
-    game_version_id: uuid.UUID | None = Query(default=None),
-    game_id: uuid.UUID | None = Query(default=None),
-    # Start node
-    start_tag: str | None = Query(default=None, description="Tag resolving to start items, e.g. 'c:ores/gold'"),
-    start_item: str | None = Query(default=None, description="Concrete item_id to start from, e.g. 'minecraft:gold_ore'"),
-    # Target node
-    target_tag: str | None = Query(default=None, description="Tag; chain succeeds when any output belongs to it"),
-    target_item: str | None = Query(default=None, description="Specific item_id; chain succeeds when it is produced"),
-    # Options
-    max_depth: int = Query(default=7, ge=1, le=12),
-    min_yield: float = Query(default=0.0, ge=0.0),
+    target: str = Query(..., description="Target item_id or #tag"),
+    start: str | None = Query(default=None, description="Start item_id or #tag; omit for backward traversal"),
+    modpack: str | None = Query(default=None, description="ModPack UUID or slug"),
+    modpack_version: str | None = Query(default=None, description="ModPack version UUID or version string; defaults to latest published"),
+    mod: list[str] = Query(default=[], description="Mod slug or UUID, optionally @version (e.g. mekanism@10.7)"),
+    game: str | None = Query(default=None, description="Game UUID or slug"),
+    game_version: str | None = Query(default=None, description="Game version UUID or version string"),
+    exclude: list[str] = Query(default=[], description="Namespace ('mekanism') or recipe_type ('mekanism:purifying') to exclude"),
+    allow_cycles: bool = Query(default=False),
+    max_depth: int = Query(default=10, ge=1, le=15),
+    limit: int = Query(default=50, ge=1, le=200),
+    quantity: float = Query(default=1.0, gt=0.0),
 ) -> dict[str, Any]:
 
-    # ── Resolve scope → mod_version_ids + scope label ─────────────────────────
-    scope_label: dict[str, Any] = {}
-    mod_version_ids: set[uuid.UUID] = set()
+    mod_version_ids, scope_info = await _resolve_scope(
+        session, modpack, modpack_version, mod, game, game_version
+    )
 
-    if modpack_id or (modpack_slug and modpack_version):
-        if modpack_id:
-            mp = await session.get(ModPack, modpack_id)
-            if not mp:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-        else:
-            result = await session.exec(
-                select(ModPack).where(
-                    ModPack.slug == modpack_slug,
-                    ModPack.version == modpack_version,
-                )
-            )
-            mp = result.scalars().one_or_none()
-            if not mp:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
-        mod_version_ids = await _mod_version_ids_for_modpack(session, mp.id)
-        scope_label = {"type": "modpack", "id": str(mp.id), "slug": mp.slug, "version": mp.version, "name": mp.name}
+    recipes, tag_to_items, item_to_canonical = await _load_recipe_graph(session, mod_version_ids)
 
-    elif mod_version_id:
-        for mvid in mod_version_id:
-            mv = await session.get(ModVersion, mvid)
-            if not mv:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, f"ModVersion {mvid} not found")
-        mod_version_ids = set(mod_version_id)
-        scope_label = {"type": "mods", "mod_version_ids": [str(v) for v in mod_version_id]}
+    target_items_list = _resolve(target, tag_to_items)
+    if not target_items_list:
+        return _empty_result(scope_info, target, start, "No items found for target")
 
-    elif game_version_id:
-        gv = await session.get(GameVersion, game_version_id)
-        if not gv:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "GameVersion not found")
-        mod_version_ids = await _mod_version_ids_for_game_version(session, game_version_id)
-        scope_label = {"type": "game_version", "id": str(gv.id), "version": gv.version}
-
-    elif game_id:
-        game = await session.get(Game, game_id)
-        if not game:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Game not found")
-        mod_version_ids = await _mod_version_ids_for_game(session, game_id)
-        scope_label = {"type": "game", "id": str(game.id), "name": game.name, "slug": game.slug}
-
-    else:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Provide one of: modpack_id, modpack_slug+modpack_version, mod_version_id (repeatable), game_version_id, game_id",
-        )
-
-    # ── Validate start/target params ──────────────────────────────────────────
-    if not start_tag and not start_item:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide start_tag or start_item")
-    if not target_tag and not target_item:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Provide target_tag or target_item")
-
-    # ── Load recipe graph ─────────────────────────────────────────────────────
-    recipes, tag_to_items, item_to_tags = await _load_recipe_graph(session, mod_version_ids)
-
-    # ── Resolve start items ───────────────────────────────────────────────────
-    if start_item:
-        resolved_start_items = [start_item]
-        resolved_start_label = start_item
-    else:
-        resolved_start_items = list(tag_to_items.get(start_tag, set()))
-        resolved_start_label = start_tag
-        if not resolved_start_items:
-            return _empty_result(scope_label, resolved_start_label, target_tag or target_item,
-                                 f"No items found in start tag '{start_tag}'")
-
-    # ── Resolve target items ──────────────────────────────────────────────────
-    if target_item:
-        resolved_target_items = {target_item}
-        resolved_target_label = target_item
-    else:
-        resolved_target_items = tag_to_items.get(target_tag, set())
-        resolved_target_label = target_tag
-        if not resolved_target_items:
-            return _empty_result(scope_label, resolved_start_label, resolved_target_label,
-                                 f"No items found in target tag '{target_tag}'")
+    target_items_set = set(target_items_list)
 
     if not recipes:
-        return _empty_result(scope_label, resolved_start_label, resolved_target_label,
-                             "No recipes loaded for this scope")
+        return _empty_result(scope_info, target, start, "No approved recipes in scope")
 
-    # ── Run DFS traversal ─────────────────────────────────────────────────────
     graph = _RecipeGraph(recipes, tag_to_items)
-    raw_chains = await asyncio.to_thread(
-        _find_chains, resolved_start_items, resolved_target_items, graph, max_depth
-    )
-    raw_chains = _deduplicate(raw_chains)
+    direction: str
 
-    chains = [_serialize_chain(c) for c in raw_chains]
-    chains = _merge_equivalent_chains(chains)
-    if min_yield > 0:
-        chains = [c for c in chains if c["yield_per_input"] >= min_yield]
-    chains.sort(key=lambda c: c["yield_per_input"], reverse=True)
+    if start is not None:
+        direction = "forward"
+        start_items = _resolve(start, tag_to_items)
+        if not start_items:
+            return _empty_result(scope_info, target, start, "No items found for start")
+
+        raw_chains, cycles_excluded = await asyncio.to_thread(
+            _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles,
+        )
+        raw_chains = _dedup_forward(raw_chains)
+        total_found = len(raw_chains)
+
+        def _yield_key(entry: tuple) -> float:
+            chain, has_cycle, _ = entry
+            if has_cycle or not chain:
+                return 0.0
+            recipe_last, runs_last = chain[-1]
+            return sum(
+                s.quantity * runs_last
+                for s in recipe_last.outputs
+                if s.item_id and s.item_id in target_items_set
+            )
+
+        raw_chains.sort(key=_yield_key, reverse=True)
+        paged = raw_chains[:limit]
+
+        serialized = [
+            _serialize_forward_chain(
+                steps=chain,
+                target_items=target_items_set,
+                item_to_canonical=item_to_canonical,
+                quantity_scale=quantity,
+                has_cycle=has_cycle,
+                cycle_at_step=cycle_step,
+                rank=i + 1,
+            )
+            for i, (chain, has_cycle, cycle_step) in enumerate(paged)
+        ]
+        cycles_found = sum(1 for _, hc, _ in raw_chains if hc)
+
+    else:
+        direction = "backward"
+
+        raw_chains_b, cycles_excluded = await asyncio.to_thread(
+            _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles,
+        )
+        raw_chains_b = _dedup_backward(raw_chains_b)
+        total_found = len(raw_chains_b)
+
+        raw_chains_b.sort(key=lambda e: (e[1], e[4]))  # (has_cycle, raw_qty)
+        paged_b = raw_chains_b[:limit]
+
+        serialized = [
+            _serialize_backward_chain(
+                steps=chain,
+                target_items=target_items_set,
+                item_to_canonical=item_to_canonical,
+                quantity_scale=quantity,
+                has_cycle=has_cycle,
+                cycle_at_step=cycle_step,
+                raw_item_id=raw_item,
+                raw_qty=raw_qty,
+                rank=i + 1,
+            )
+            for i, (chain, has_cycle, cycle_step, raw_item, raw_qty) in enumerate(paged_b)
+        ]
+        cycles_found = sum(1 for _, hc, _, _, _ in raw_chains_b if hc)
 
     return {
-        "scope": scope_label,
-        "start": resolved_start_label,
-        "target": resolved_target_label,
-        "chain_count": len(chains),
-        "chains": chains,
+        "target": target,
+        "start": start,
+        "direction": direction,
+        "scope": scope_info,
+        "quantity": quantity,
+        "total_found": total_found,
+        "returned": len(serialized),
+        "cycles_found": cycles_found,
+        "cycles_excluded": cycles_excluded,
+        "excluded_applied": exclude,
+        "chains": serialized,
     }
 
 
-def _empty_result(scope: dict, start: str | None, target: str | None, note: str) -> dict:
+def _empty_result(scope_info: dict, target: str, start: str | None, note: str) -> dict[str, Any]:
     return {
-        "scope": scope,
-        "start": start,
         "target": target,
-        "chain_count": 0,
+        "start": start,
+        "direction": "forward" if start else "backward",
+        "scope": scope_info,
+        "quantity": 1.0,
+        "total_found": 0,
+        "returned": 0,
+        "cycles_found": 0,
+        "cycles_excluded": 0,
+        "excluded_applied": [],
         "chains": [],
         "note": note,
     }

@@ -60,16 +60,27 @@ export interface ModVersion {
 	created_at: string;
 }
 
-export interface ModPack {
+export interface ModPackIdentity {
 	id: string;
+	game_id: string;
+	name: string;
+	slug: string;
+	source_url: string | null;
+	description: string | null;
+	icon_url: string | null;
+}
+
+export interface ModPackVersion {
+	id: string;
+	identity_id: string;
 	game_version_id: string;
 	name: string;
 	slug: string;
 	version: string;
 	status: 'draft' | 'published' | 'deprecated' | 'archived';
+	icon_url: string | null;
 	source_url: string | null;
 	description: string | null;
-	icon_url: string | null;
 }
 
 export interface AdminGroup {
@@ -85,7 +96,7 @@ export interface Recipe {
 	import_key: string;
 	recipe_type: string;
 	machine_identity_id: string | null;
-	modpack_id: string | null;
+	modpack_version_id: string | null;
 	status: 'draft' | 'pending_review' | 'approved' | 'rejected';
 	source_priority: number;
 	contributor_id: string | null;
@@ -112,53 +123,82 @@ export interface RecipeReview {
 	created_at: string;
 }
 
-export interface ChainStepSlot {
+// ── Chain types (matches /chains response) ────────────────────────────────────
+
+export interface ChainScopeModpack {
+	type: 'modpack';
+	modpack_identity_id: string;
+	modpack_version_id: string;
+	modpack_name: string;
+	modpack_version: string;
+}
+
+export interface ChainScopeMods {
+	type: 'mods';
+	mods: { mod: string; version: string; mod_version_id: string }[];
+	game_version_id?: string;
+}
+
+export interface ChainScopeGame {
+	type: 'game';
+	game_id: string;
+	game_version_id: string;
+}
+
+export type ChainScope = ChainScopeModpack | ChainScopeMods | ChainScopeGame;
+
+export interface ChainSlot {
+	tag: string | null;
 	item_id: string | null;
-	tag_string: string | null;
+	canonical_name?: string | null;
 	quantity: number;
+	is_fluid: boolean;
 }
 
-export interface ChainStepOutput {
-	item_id: string;
-	quantity: number;
-}
-
-export interface ChainStepAux {
-	label: string;
-	quantity: number;
-}
-
-export interface MachineOption {
+export interface ChainMachine {
+	id: string;
 	name: string;
-	recipe_id: string;
+	recipe_type: string;
+	mod_namespace: string;
 }
 
 export interface ChainStep {
+	step: number;
+	machine: ChainMachine;
 	recipe_id: string;
-	recipe_type: string;
-	machine: string;
-	machine_options: MachineOption[];
-	input_quantity: number;
-	output_quantity: number;
-	inputs: ChainStepSlot[];
-	outputs: ChainStepOutput[];
-	aux_inputs: ChainStepAux[];
+	inputs: ChainSlot[];
+	outputs: ChainSlot[];
+	aux_inputs: ChainSlot[];
+	time_ticks: number | null;
+	energy_rf: number | null;
 }
 
 export interface Chain {
-	yield_per_input: number;
-	step_count: number;
-	machine_sequence: string[];
-	chemicals_required: string[];
+	rank: number;
+	yield_per_start_item: number | null;
+	raw_materials_per_target: number | null;
+	has_cycle: boolean;
+	cycle_at_step: number | null;
+	raw_inputs: ChainSlot[];
+	final_outputs: { item_id: string; canonical_name: string | null; quantity: number }[];
 	steps: ChainStep[];
+	machines_required: ChainMachine[];
+	chemicals_required: string[];
 }
 
 export interface ChainResponse {
-	modpack: { id: string; name: string; version: string };
-	start: string;
 	target: string;
-	chain_count: number;
+	start: string | null;
+	direction: 'forward' | 'backward';
+	scope: ChainScope;
+	quantity: number;
+	total_found: number;
+	returned: number;
+	cycles_found: number;
+	cycles_excluded: number;
+	excluded_applied: string[];
 	chains: Chain[];
+	note?: string;
 }
 
 export interface PaginatedResponse<T> {

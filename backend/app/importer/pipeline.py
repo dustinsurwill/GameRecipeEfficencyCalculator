@@ -38,7 +38,7 @@ from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot, SourcePriority
 from app.models.status import PublicationStatus, RecipeStatus
 from app.models.versioning import (
-    Game, GameVersion, Mod, ModPack, ModPackModVersion, ModVersion,
+    Game, GameVersion, Mod, ModPackIdentity, ModPackVersion, ModPackModVersion, ModVersion,
 )
 
 # Re-use the recipe parser and tag index from the CLI analyzer
@@ -88,22 +88,42 @@ async def _get_or_create_modpack(
     name: str,
     slug: str,
     version: str,
-) -> ModPack:
-    result = await session.exec(
-        select(ModPack).where(ModPack.slug == slug, ModPack.version == version)
+) -> ModPackVersion:
+    # Get or create the stable identity record
+    identity_result = await session.exec(
+        select(ModPackIdentity).where(
+            ModPackIdentity.game_id == game_version.game_id,
+            ModPackIdentity.slug == slug,
+        )
     )
-    mp = result.scalars().one_or_none()
-    if not mp:
-        mp = ModPack(
-            game_version_id=game_version.id,
+    identity = identity_result.scalars().one_or_none()
+    if not identity:
+        identity = ModPackIdentity(
+            game_id=game_version.game_id,
             name=name,
             slug=slug,
+        )
+        session.add(identity)
+        await session.flush()
+
+    # Get or create this specific version
+    version_result = await session.exec(
+        select(ModPackVersion).where(
+            ModPackVersion.identity_id == identity.id,
+            ModPackVersion.version == version,
+        )
+    )
+    mpv = version_result.scalars().one_or_none()
+    if not mpv:
+        mpv = ModPackVersion(
+            identity_id=identity.id,
+            game_version_id=game_version.id,
             version=version,
             status=PublicationStatus.PUBLISHED,
         )
-        session.add(mp)
+        session.add(mpv)
         await session.flush()
-    return mp
+    return mpv
 
 
 async def _get_or_create_mod(
@@ -149,7 +169,7 @@ async def _get_or_create_mod_version(
 
 
 async def _ensure_modpack_mod_version_link(
-    session: AsyncSession, modpack: ModPack, mod_version: ModVersion
+    session: AsyncSession, modpack: ModPackVersion, mod_version: ModVersion
 ) -> None:
     result = await session.exec(
         select(ModPackModVersion).where(
@@ -284,7 +304,7 @@ async def _import_recipe(
     cli_recipe: CliRecipe,
     game: Game,
     mod_version: ModVersion,
-    modpack: ModPack,
+    modpack: ModPackVersion,
     tag_index: TagIndex,
     is_modpack_recipe: bool,
 ) -> None:
@@ -302,7 +322,7 @@ async def _import_recipe(
         recipe_type=cli_recipe.type,
         import_key=import_key,
         source_priority=SourcePriority.MODPACK if is_modpack_recipe else SourcePriority.MOD,
-        modpack_id=modpack.id if is_modpack_recipe else None,
+        modpack_version_id=modpack.id if is_modpack_recipe else None,
         time_ticks=int(cli_recipe.time_ticks) if cli_recipe.time_ticks else None,
         conditions_met=cli_recipe.conditions_met,
         status=RecipeStatus.APPROVED,

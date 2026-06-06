@@ -5,26 +5,27 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
-	import type { Game, GameVersion, Mod, ModVersion, ModPack } from '$lib/types';
+	import type { Game, Mod, ModVersion, ModPackIdentity, ChainResponse, Chain } from '$lib/types';
 
 	const BASE = import.meta.env.VITE_API_BASE as string;
 
 	// ── Catalog state ─────────────────────────────────────────────────────────
 	let games = $state<Game[]>([]);
-	let modpacks = $state<ModPack[]>([]);
+	let modpacks = $state<ModPackIdentity[]>([]);
 	let catalogSearch = $state('');
 	let catalogLoading = $state(true);
 
 	// ── Search form state ─────────────────────────────────────────────────────
 	let scopeType = $state<'modpack' | 'mods' | 'game'>('modpack');
 
-	// Modpack scope
+	// Modpack scope — identity UUID; backend picks latest version
 	let selectedModpackId = $state('');
 
 	// Game/mods scope
 	let selectedGameId = $state('');
 	let gameMods = $state<Mod[]>([]);
 	let modVersionMap = $state<Record<string, ModVersion[]>>({});
+	// values are version strings (e.g. "10.7.18.84"), not UUIDs
 	let selectedModVersions = $state<Record<string, string>>({});
 	let modsLoading = $state(false);
 
@@ -34,10 +35,9 @@
 	let useTag = $state(true);
 
 	// Results
-	let results = $state<any>(null);
+	let results = $state<ChainResponse | null>(null);
 	let searchError = $state('');
 	let loading = $state(false);
-	let chainMachineSelections = $state<Record<number, Record<number, number>>>({});
 
 	// ── Derived ───────────────────────────────────────────────────────────────
 	let filteredModpacks = $derived(
@@ -86,23 +86,22 @@
 		fetch(`${BASE}/mods?game_id=${gameId}`)
 			.then((r) => (r.ok ? r.json() : []))
 			.then(async (mods: Mod[]) => {
-				if (selectedGameId !== gameId) return; // stale, discard
+				if (selectedGameId !== gameId) return;
 				gameMods = mods;
-				const results = await Promise.all(
+				const fetched = await Promise.all(
 					mods.map(async (m) => {
 						const r = await fetch(`${BASE}/mods/${m.id}/versions`);
 						const versions: ModVersion[] = r.ok ? await r.json() : [];
-						const latest =
-							versions.find((v) => v.status === 'published') ?? versions[0];
-						return { modId: m.id, versions, defaultId: latest?.id ?? '' };
+						const latest = versions.find((v) => v.status === 'published') ?? versions[0];
+						return { modId: m.id, versions, defaultVer: latest?.version ?? '' };
 					})
 				);
-				if (selectedGameId !== gameId) return; // stale, discard
+				if (selectedGameId !== gameId) return;
 				const vmap: Record<string, ModVersion[]> = {};
 				const smap: Record<string, string> = {};
-				for (const e of results) {
+				for (const e of fetched) {
 					vmap[e.modId] = e.versions;
-					smap[e.modId] = e.defaultId;
+					smap[e.modId] = e.defaultVer;
 				}
 				modVersionMap = vmap;
 				selectedModVersions = smap;
@@ -112,7 +111,7 @@
 			});
 	});
 
-	function prefillModpack(mp: ModPack) {
+	function prefillModpack(mp: ModPackIdentity) {
 		scopeType = 'modpack';
 		selectedModpackId = mp.id;
 		document.getElementById('chain-search')?.scrollIntoView({ behavior: 'smooth' });
@@ -131,7 +130,7 @@
 		} else {
 			const versions = modVersionMap[mod.id] ?? [];
 			const latest = versions.find((v) => v.status === 'published') ?? versions[0];
-			copy[mod.id] = latest?.id ?? '';
+			copy[mod.id] = latest?.version ?? '';
 		}
 		selectedModVersions = copy;
 	}
@@ -143,28 +142,33 @@
 		loading = true;
 		try {
 			const params = new URLSearchParams();
+
 			if (scopeType === 'modpack' && selectedModpackId) {
-				params.set('modpack_id', selectedModpackId);
+				params.set('modpack', selectedModpackId);
 			} else if (scopeType === 'mods') {
-				const mvIds = Object.values(selectedModVersions).filter(Boolean);
-				if (mvIds.length === 0) {
+				const entries = Object.entries(selectedModVersions).filter(([, ver]) => ver);
+				if (entries.length === 0) {
 					searchError = 'Select at least one mod.';
 					return;
 				}
-				for (const mvId of mvIds) params.append('mod_version_id', mvId);
+				for (const [modId, ver] of entries) {
+					params.append('mod', ver ? `${modId}@${ver}` : modId);
+				}
+				if (selectedGameId) params.set('game', selectedGameId);
 			} else if (scopeType === 'game' && selectedGameId) {
-				params.set('game_id', selectedGameId);
+				params.set('game', selectedGameId);
 			} else {
 				searchError = 'Select a scope (modpack, mods, or game).';
 				return;
 			}
-			if (useTag) {
-				params.set('start_tag', startInput);
-				params.set('target_tag', targetInput);
-			} else {
-				params.set('start_item', startInput);
-				params.set('target_item', targetInput);
+
+			const target = useTag ? `#${targetInput}` : targetInput;
+			params.set('target', target);
+			if (startInput) {
+				const start = useTag ? `#${startInput}` : startInput;
+				params.set('start', start);
 			}
+
 			const res = await fetch(`${BASE}/chains?${params}`);
 			if (res.status === 429) {
 				searchError = 'Too many requests — please wait a moment and try again.';
@@ -175,15 +179,21 @@
 				searchError = data.detail ?? `Error ${res.status}`;
 				return;
 			}
-			const data = await res.json();
+			const data: ChainResponse = await res.json();
 			results = data;
-			chainMachineSelections = {};
-			if (data.chain_count === 0) searchError = data.note ?? 'No chains found.';
+			if (data.total_found === 0) searchError = data.note ?? 'No chains found.';
 		} catch {
 			searchError = 'Network error — could not reach the server.';
 		} finally {
 			loading = false;
 		}
+	}
+
+	function scopeLabel(chain: ChainResponse): string {
+		const s = chain.scope;
+		if (s.type === 'modpack') return `${s.modpack_name} v${s.modpack_version}`;
+		if (s.type === 'mods') return `${s.mods.length} mod${s.mods.length === 1 ? '' : 's'}`;
+		return 'All game recipes';
 	}
 </script>
 
@@ -241,7 +251,7 @@
 											{/if}
 											<div>
 												<p class="text-sm font-medium leading-tight">{mp.name}</p>
-												<p class="text-xs text-muted-foreground">v{mp.version}</p>
+												<p class="text-xs text-muted-foreground font-mono">{mp.slug}</p>
 											</div>
 										</div>
 										{#if mp.description}
@@ -296,9 +306,10 @@
 								>
 									<option value="">Select a modpack…</option>
 									{#each modpacks as mp}
-										<option value={mp.id}>{mp.name} v{mp.version}</option>
+										<option value={mp.id}>{mp.name}</option>
 									{/each}
 								</select>
+								<p class="text-xs text-muted-foreground">Latest published version will be used automatically.</p>
 							</div>
 						{:else}
 							<div class="space-y-1">
@@ -344,7 +355,7 @@
 															class="text-xs border rounded px-1 py-0.5 max-w-[90px] flex-shrink-0"
 														>
 															{#each versions as v}
-																<option value={v.id}>{v.version}</option>
+																<option value={v.version}>{v.version}</option>
 															{/each}
 														</select>
 													{:else if isChecked && versions.length === 1}
@@ -377,12 +388,11 @@
 					<!-- Start / target + submit -->
 					<div class="grid gap-4 sm:grid-cols-[1fr_1fr_auto]">
 						<div class="space-y-1">
-							<Label for="start">Start {useTag ? 'tag' : 'item'}</Label>
+							<Label for="start">Start {useTag ? 'tag' : 'item'} <span class="text-muted-foreground text-xs">(optional — omit for backward search)</span></Label>
 							<Input
 								id="start"
 								placeholder={useTag ? 'e.g. c:ores/gold' : 'e.g. minecraft:raw_gold'}
 								bind:value={startInput}
-								required
 							/>
 						</div>
 						<div class="space-y-1">
@@ -408,34 +418,61 @@
 			<p class="text-destructive text-sm">{searchError}</p>
 		{/if}
 
-		{#if results && results.chain_count > 0}
+		{#if results && results.total_found > 0}
 			<p class="text-muted-foreground text-sm">
-				{results.chain_count} chain{results.chain_count === 1 ? '' : 's'} ·
-				{results.start} → {results.target}
-				{#if results.scope?.type === 'modpack'}
-					· {results.scope.name} v{results.scope.version}
-				{:else if results.scope?.type === 'game'}
-					· {results.scope.name}
-				{:else if results.scope?.type === 'mods'}
-					· {results.scope.mod_version_ids?.length} mod version{results.scope.mod_version_ids?.length === 1 ? '' : 's'}
+				{results.total_found} chain{results.total_found === 1 ? '' : 's'} ·
+				{results.direction === 'forward' ? `${results.start} → ${results.target}` : `← ${results.target}`}
+				· {scopeLabel(results)}
+				{#if results.cycles_excluded > 0}
+					· {results.cycles_excluded} cyclic chain{results.cycles_excluded === 1 ? '' : 's'} excluded
 				{/if}
 			</p>
 
-			{#each results.chains as chain, i}
+			{#each results.chains as chain}
 				<Card.Root>
 					<Card.Header>
 						<Card.Title class="text-base">
-							Chain {i + 1} — {chain.yield_per_input.toFixed(2)}× yield
+							Chain {chain.rank}
+							{#if chain.yield_per_start_item != null}
+								— {chain.yield_per_start_item.toFixed(3)}× yield per input
+							{:else if chain.raw_materials_per_target != null}
+								— {chain.raw_materials_per_target.toFixed(3)} raw per target
+							{/if}
+							{#if chain.has_cycle}
+								<span class="ml-2 text-xs text-yellow-600 dark:text-yellow-400">(cyclic)</span>
+							{/if}
 						</Card.Title>
 						<Card.Description>
-							{chain.step_count} step{chain.step_count === 1 ? '' : 's'} ·
-							{chain.machine_sequence.join(' → ')}
+							{chain.steps.length} step{chain.steps.length === 1 ? '' : 's'} ·
+							{chain.machines_required.map((m) => m.name).join(' → ')}
 							{#if chain.chemicals_required.length > 0}
 								· chemicals: {chain.chemicals_required.join(', ')}
 							{/if}
 						</Card.Description>
 					</Card.Header>
 					<Card.Content>
+						<!-- Raw inputs / final outputs summary -->
+						{#if chain.raw_inputs.length > 0 || chain.final_outputs.length > 0}
+							<div class="flex gap-6 mb-3 text-sm">
+								{#if chain.raw_inputs.length > 0}
+									<div>
+										<p class="text-xs text-muted-foreground mb-1">Raw inputs</p>
+										{#each chain.raw_inputs as inp}
+											<p>{inp.quantity.toFixed(3)}× {inp.item_id ?? inp.tag ?? '?'}</p>
+										{/each}
+									</div>
+								{/if}
+								{#if chain.final_outputs.length > 0}
+									<div>
+										<p class="text-xs text-muted-foreground mb-1">Final outputs</p>
+										{#each chain.final_outputs as out}
+											<p>{out.quantity.toFixed(3)}× {out.canonical_name ?? out.item_id}</p>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/if}
+
 						<Table.Root>
 							<Table.Header>
 								<Table.Row>
@@ -446,40 +483,24 @@
 								</Table.Row>
 							</Table.Header>
 							<Table.Body>
-								{#each chain.steps as step, j}
+								{#each chain.steps as step}
 									<Table.Row>
-										<Table.Cell class="text-muted-foreground">{j + 1}</Table.Cell>
+										<Table.Cell class="text-muted-foreground">{step.step}</Table.Cell>
 										<Table.Cell class="font-medium">
-											{#if step.machine_options && step.machine_options.length > 1}
-												<select
-													class="text-sm border rounded px-1 py-0.5 bg-background"
-													onchange={(e) => {
-														const idx = parseInt((e.target as HTMLSelectElement).value);
-														chainMachineSelections = {
-															...chainMachineSelections,
-															[i]: { ...(chainMachineSelections[i] ?? {}), [j]: idx }
-														};
-													}}
-												>
-													{#each step.machine_options as opt, oi}
-														<option value={oi}>{opt.name}</option>
-													{/each}
-												</select>
-											{:else}
-												{step.machine}
-											{/if}
+											<div>{step.machine.name}</div>
+											<div class="text-xs text-muted-foreground font-mono">{step.machine.recipe_type}</div>
 										</Table.Cell>
 										<Table.Cell class="text-sm">
 											{#each step.inputs as inp}
-												<div>{inp.quantity}× {inp.item_id ?? inp.tag_string}</div>
+												<div>{inp.quantity.toFixed(2)}× {inp.item_id ?? inp.tag ?? '?'}</div>
 											{/each}
 											{#each step.aux_inputs as aux}
-												<div class="text-muted-foreground">{aux.quantity}× {aux.label} (fluid)</div>
+												<div class="text-muted-foreground">{aux.quantity.toFixed(2)}× {aux.item_id ?? '?'} (fluid)</div>
 											{/each}
 										</Table.Cell>
 										<Table.Cell class="text-sm">
 											{#each step.outputs as out}
-												<div>{out.quantity}× {out.item_id}</div>
+												<div>{out.quantity.toFixed(2)}× {out.canonical_name ?? out.item_id ?? '?'}</div>
 											{/each}
 										</Table.Cell>
 									</Table.Row>

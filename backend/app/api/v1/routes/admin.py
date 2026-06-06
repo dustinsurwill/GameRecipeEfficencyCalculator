@@ -35,7 +35,7 @@ from app.models.admin import (
     is_modpack_admin,
 )
 from app.models.status import PublicationStatus
-from app.models.versioning import ModPack, ModVersion
+from app.models.versioning import ModPackVersion, ModVersion
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -264,8 +264,8 @@ async def _transition_modpack(
     modpack_id: uuid.UUID,
     target_status: PublicationStatus,
     allowed_from: list[PublicationStatus],
-) -> ModPack:
-    mp = await session.get(ModPack, modpack_id)
+) -> ModPackVersion:
+    mp = await session.get(ModPackVersion, modpack_id)
     if not mp:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
 

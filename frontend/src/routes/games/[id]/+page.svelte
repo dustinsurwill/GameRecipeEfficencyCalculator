@@ -5,14 +5,14 @@
 	import * as Table from '$lib/components/ui/table';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import type { Game, GameVersion, Mod, ModPack, MachineIdentity, ItemIdentityRead } from '$lib/types';
+	import type { Game, GameVersion, Mod, ModPackIdentity, MachineIdentity, ItemIdentityRead } from '$lib/types';
 
 	const BASE = import.meta.env.VITE_API_BASE as string;
 	const ITEM_LIMIT = 50;
 
 	let game = $state<Game | null>(null);
 	let versions = $state<GameVersion[]>([]);
-	let modpacks = $state<ModPack[]>([]);
+	let modpacks = $state<ModPackIdentity[]>([]);
 	let mods = $state<Mod[]>([]);
 	let machines = $state<MachineIdentity[]>([]);
 	let items = $state<ItemIdentityRead[]>([]);
@@ -35,7 +35,8 @@
 			? modpacks.filter(
 					(mp) =>
 						mp.name.toLowerCase().includes(modpackSearch.toLowerCase()) ||
-						mp.slug.toLowerCase().includes(modpackSearch.toLowerCase())
+						mp.slug.toLowerCase().includes(modpackSearch.toLowerCase()) ||
+						(mp.description ?? '').toLowerCase().includes(modpackSearch.toLowerCase())
 			  )
 			: modpacks
 	);
@@ -140,7 +141,7 @@
 					</p>
 				{/if}
 			</div>
-			<a href="/?game_id={game.id}">
+			<a href="/?game={game.id}">
 				<Button>Search chains</Button>
 			</a>
 		</div>
@@ -174,7 +175,7 @@
 								{/if}
 								<div class="min-w-0">
 									<p class="font-medium text-sm truncate">{mp.name}</p>
-									<p class="text-xs text-muted-foreground">v{mp.version}</p>
+									<p class="text-xs text-muted-foreground font-mono">{mp.slug}</p>
 								</div>
 							</a>
 						{/each}
