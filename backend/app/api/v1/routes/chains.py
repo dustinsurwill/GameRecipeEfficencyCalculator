@@ -507,6 +507,7 @@ def _backward_dfs(
             return
 
         new_path = path | {item_id}
+        expanded = False
 
         for recipe in producing:
             out_slot = next((s for s in recipe.outputs if s.item_id == item_id), None)
@@ -528,6 +529,7 @@ def _backward_dfs(
                 input_items = [i for i in input_items if not excl.item_blocked(i)]
 
                 for input_item in input_items:
+                    expanded = True
                     dfs(
                         input_item,
                         in_slot.quantity * runs,
@@ -535,6 +537,14 @@ def _backward_dfs(
                         new_path,
                         depth + 1,
                     )
+
+        if not expanded and not steps_rev:
+            return
+        if not expanded:
+            # every producer takes only fluids/catalysts (e.g. casting): nothing to follow, so the item
+            # is a starting point here, just as it was before such recipes were imported
+            all_chains.append((list(reversed(steps_rev)), False, None, item_id, quantity))
+            budget.add_chain()
 
     for item in target_items:
         dfs(item, 1.0, [], frozenset(), 0)

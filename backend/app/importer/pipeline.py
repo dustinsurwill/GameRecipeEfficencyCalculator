@@ -52,6 +52,7 @@ from atm10_ore_analyzer import (
     parse_recipe,
 )
 from atm10_ore_analyzer import Recipe as CliRecipe
+from atm10_ore_analyzer import Slot
 
 
 # ── Versioning helpers ────────────────────────────────────────────────────────
@@ -342,6 +343,12 @@ async def _import_recipe(
     )
     for order, (slot, slot_type) in enumerate(all_slots):
         appearance_id = None
+        if slot_type == "output" and slot.tag and not slot.item and not slot.fluid:
+            # "outputs any c:dusts/iron": store one concrete member so the route graph can use it
+            member = tag_index.canonical_item(slot.tag)
+            if not member:
+                continue
+            slot = Slot(tag=None, item=member, count=slot.count)
         if not (slot.item or slot.tag or slot.chemical):
             continue
 

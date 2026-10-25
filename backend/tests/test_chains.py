@@ -109,3 +109,10 @@ def test_routes_needing_other_items_rank_below_self_contained_ones_in_yield_mode
     chains, _, _ = _deepen(lambda d, b: _forward_dfs(["s:a"], {"t:z"}, g, _Excluder(), d, False, b), 2)
     ranked = _rank_forward(chains, {"t:z"}, by_yield=True)
     assert [c[0][0][0].machine.id for c in ranked] == ["mp", "ms"]
+
+
+def test_item_made_only_from_fluids_is_still_a_starting_point():
+    cast = rec("t:cast", "caster", [], [("goal:g", 1)])          # fluid + cast only: no item inputs
+    use = rec("t:use", "m", [("goal:g", 1)], [("final:f", 1)])
+    ranked = back(graph(cast, use), "final:f", _Excluder())
+    assert [(len(c[0]), c[3]) for c in ranked] == [(1, "goal:g")]

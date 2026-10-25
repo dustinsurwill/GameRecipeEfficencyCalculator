@@ -151,10 +151,18 @@ def _parse_conditions_met(data: dict) -> bool:
 _SHAPED_TYPES = ("minecraft:crafting_shaped", "crafting_shaped", "kubejs:shaped")
 _SHAPELESS_TYPES = ("minecraft:crafting_shapeless", "crafting_shapeless", "kubejs:shapeless")
 _INPUT_KEYS = (
-    "ingredient", "ingredients", "input", "inputs", "item_input", "item_inputs",
-    "sources", "base", "addition", "template", "material", "catalyst", "soil", "target_item",
+    "ingredient", "ingredients", "input", "inputs", "item_input", "item_inputs", "main_input",
+    "input_items", "materials", "material", "sources", "base", "addition", "template", "reagent",
+    "pedestalItems", "catalyst", "soil", "target_item", "gear", "block", "item1", "item2", "item3",
+    "input0", "input1", "ingredient1", "ingredient2", "left_input", "right_input", "input_item", "mercury", "salt", "sulfur", "leafA", "leafB", "source_item",
 )
-_OUTPUT_KEYS = ("result", "results", "output", "outputs", "output_item", "outputItems")
+# fluids / chemicals are tracked as aux inputs (they are not items in the route graph)
+_AUX_KEYS = ("fluid", "fluids", "fluid_input", "fluidInput", "chemical_input", "input_fluid", "extra_input", "additives")
+_OUTPUT_KEYS = (
+    "result", "results", "output", "outputs", "output_item", "outputItems", "main_output",
+    "fluid_output", "chemical_output", "fluidOutputs", "fluid_outputs", "output_fluid",
+)
+_SLOT_KEYS = ("item", "id", "tag", "fluid", "ingredient", "basePredicate", "items", "stack")
 
 
 def _aggregate(slots) -> list[Slot]:
@@ -183,20 +191,47 @@ def _entry_to_slot(e: Any, is_output: bool) -> Optional[Slot]:
         return Slot(tag=e[1:], item=None, count=1.0) if e.startswith("#") else Slot(tag=None, item=e, count=1.0)
     if not isinstance(e, dict):
         return None
+    # dynamic ingredients (type: some:crop_component, ...) have no static item; Mystical Agriculture
+    # essence is the one we can name exactly
+    if "type" in e and not any(k in e for k in _SLOT_KEYS):
+        if isinstance(e.get("ingredients"), list) and e["ingredients"]:      # neoforge:compound etc.
+            return _entry_to_slot(e["ingredients"][0], is_output)
+        if isinstance(e.get("chemical"), str):
+            return Slot(tag=None, item=None, count=_num(e.get("amount"), 1), fluid=True, chemical=e["chemical"])
+        if e.get("type") == "mysticalagriculture:crop_component" and e.get("component") == "essence" \
+                and isinstance(e.get("crop"), str):
+            return Slot(tag=None, item=f"mysticalagriculture:{e['crop'].split(':')[-1]}_essence", count=1.0)
+        return None
+    # IE-style {"basePredicate": {"item"|"tag": ...}, "count": N}
+    if isinstance(e.get("basePredicate"), dict):
+        inner = _entry_to_slot(e["basePredicate"], is_output)
+        if inner:
+            inner.count = _num(e.get("count"), inner.count)
+        return inner
     # wrappers such as {"ingredient": {...}, "count": 2} or {"item": {...}, "chance": .5}
-    for wrap in ("ingredient", "item", "stack"):
+    for wrap in ("ingredient", "item", "stack", "result"):
         if isinstance(e.get(wrap), (dict, list)):
             inner = _entry_to_slot(e[wrap] if isinstance(e[wrap], dict) else (e[wrap] or [None])[0], is_output)
             if inner:
                 inner.count = _num(e.get("count", e.get("amount")), inner.count)
+                chance = e.get("chance", e.get("probability"))
+                if is_output and isinstance(chance, (int, float)) and 0 < chance < 1:
+                    inner.count *= chance
             return inner
     if isinstance(e.get("items"), str) and "components" in e:   # NeoForge component ingredient
         return Slot(tag=None, item=e["items"], count=_num(e.get("count"), 1))
+    if isinstance(e.get("chemical"), str):
+        return Slot(tag=None, item=None, count=_num(e.get("amount"), 1), fluid=True, chemical=e["chemical"])
     fluid = e.get("fluid")
+    if fluid == "minecraft:empty" or e.get("id") == "minecraft:empty":     # unused-fluid placeholder
+        return None
+    if isinstance(fluid, str) and fluid.startswith("#"):
+        return Slot(tag=fluid[1:], item=None, count=_num(e.get("amount"), 1000), fluid=True)
     if isinstance(fluid, str):
         return Slot(tag=None, item=fluid, count=_num(e.get("amount"), 1000), fluid=True)
     if e.get("tag") and not e.get("id"):
-        return Slot(tag=e["tag"], item=None, count=_num(e.get("count"), 1))
+        return Slot(tag=e["tag"], item=None, count=_num(e.get("count", e.get("amount")), 1),
+                    fluid="amount" in e and "count" not in e)
     item = e.get("item") or e.get("id")
     if isinstance(item, str):
         is_fluid_like = "amount" in e and "count" not in e
@@ -211,29 +246,74 @@ def _output_slots(res: Any) -> list[Slot]:
     out = []
     for e in entries:
         sl = _entry_to_slot(e, True)
-        if sl and sl.item:
+        if sl and (sl.item or sl.tag):      # tag-only outputs are resolved to a member item on import
             out.append(sl)
     return out
+
+
+def _entries(v: Any) -> list[Any]:
+    """Flatten a recipe field into a list of ingredient-like entries.
+
+    Accepts a single entry, a list (each element may itself be a list of alternatives -> first),
+    or a dict of NAMED slots such as ae2's {"top": ..., "middle": ...} or pneumaticcraft's inputs."""
+    if isinstance(v, dict) and not any(k in v for k in _SLOT_KEYS):
+        return [x for x in v.values() if isinstance(x, (dict, str, list))]
+    items = v if isinstance(v, list) else [v]
+    return [(x[0] if isinstance(x, list) and x else x) for x in items]
 
 
 def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: list[Slot]) -> bool:
     for k in _INPUT_KEYS:
         v = data.get(k)
-        if v is None:
+        if v is None or isinstance(v, (bool, int, float)):
             continue
-        entries = v if isinstance(v, list) else [v]
-        # lists of alternatives inside a list entry -> first
-        flat = [(x[0] if isinstance(x, list) and x else x) for x in entries]
-        for sl in _aggregate(_entry_to_slot(x, False) for x in flat):
+        if isinstance(v, str) and k in ("block", "material"):    # block ids, not item ingredients
+            continue
+        for sl in _aggregate(_entry_to_slot(x, False) for x in _entries(v)):
             (aux if sl.fluid else inputs).append(sl)
+    for k in _AUX_KEYS:
+        v = data.get(k)
+        if v is None or isinstance(v, (bool, int, float)):
+            continue
+        for sl in _aggregate(_entry_to_slot(x, False) for x in _entries(v)):
+            sl.fluid = True if k != "additives" else sl.fluid
+            aux.append(sl)
+    # casting: the cast is a catalyst unless the recipe consumes it
+    cast = _slot_from_ingredient(data.get("cast")) if isinstance(data.get("cast"), dict) else None
+    if cast:
+        (inputs if data.get("consume_cast") else aux).append(cast)
     for k in _OUTPUT_KEYS:
         v = data.get(k)
         if v is None:
             continue
-        outputs.extend(_output_slots(v))
-        if outputs:
-            break
+        outputs.extend(_output_slots(_entries(v) if isinstance(v, dict) and not any(x in v for x in _SLOT_KEYS) else v))
+    if not outputs and isinstance(data.get("fluid"), (dict, list)):
+        # e.g. IE fermenter: item in, `fluid` out. The fluid is the product when nothing else is.
+        moved = [a for a in aux if a.fluid and (a.item or a.tag)]
+        for a in moved:
+            aux.remove(a)
+            outputs.append(a)
+    sec = data.get("secondary_output")
+    if isinstance(sec, dict):
+        for sl in _output_slots(sec):
+            sl.count *= _num(data.get("secondary_chance"), 1.0)
+            outputs.append(sl)
     return bool(inputs or aux) and bool(outputs)
+
+
+def _parse_grid(data: dict, inputs: list[Slot], outputs: list[Slot]) -> None:
+    key = data.get("key", {})
+    counts: dict[tuple, float] = {}
+    for row in data.get("pattern", []):
+        for ch in row:
+            ing = key.get(ch)
+            if ing is None:
+                continue
+            sl = _slot_from_ingredient(ing)
+            if sl:
+                counts[(sl.tag, sl.item)] = counts.get((sl.tag, sl.item), 0) + 1
+    inputs.extend(Slot(tag=t, item=i, count=c) for (t, i), c in counts.items())
+    outputs.extend(_output_slots(data.get("result")))
 
 
 def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe]:
@@ -418,19 +498,6 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         for item_id, total in item_totals2.items():
             outputs.append(Slot(tag=None, item=item_id, count=total))
 
-    # ── Railcraft Crusher ─────────────────────────────────────────────────────
-    elif rtype == "railcraft:crusher":
-        s = _slot_from_ingredient(data.get("ingredient"))
-        if s:
-            inputs.append(s)
-        for out in data.get("outputs", []):
-            prob = float(out.get("probability", out.get("chance", 1.0)))
-            res = out.get("result", {})
-            item_id = res.get("item") or res.get("id")
-            cnt = float(res.get("count", 1)) * prob
-            if item_id:
-                outputs.append(Slot(tag=None, item=item_id, count=cnt))
-
     # ── PneumaticCraft Pressure Chamber ──────────────────────────────────────
     elif rtype == "pneumaticcraft:pressure_chamber":
         for inp in data.get("inputs", []):
@@ -495,7 +562,7 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
 
     # ── Oritech machines ──────────────────────────────────────────────────
     elif rtype in ("oritech:grinder", "oritech:pulverizer", "oritech:centrifuge",
-                   "oritech:foundry", "oritech:refinery", "oritech:assembler"):
+                   "oritech:foundry", "oritech:refinery", "oritech:assembler", "oritech:centrifuge_fluid"):
         for ing in data.get("ingredients", []):
             s = _slot_from_ingredient(ing)
             if s:
@@ -512,6 +579,9 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
                 item_totals3[item_id] = item_totals3.get(item_id, 0.0) + float(r.get("count", 1)) * chance
         for item_id, total in item_totals3.items():
             outputs.append(Slot(tag=None, item=item_id, count=total))
+        for fo in data.get("fluidOutputs", []):
+            if fo.get("fluid"):
+                outputs.append(Slot(tag=None, item=fo["fluid"], count=float(fo.get("amount", 1)), fluid=True))
         time_ticks = data.get("time")
 
     # ── Industrial Foregoing crusher ──────────────────────────────────────
@@ -522,20 +592,29 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         res = data.get("output", {})
         outputs.append(Slot(tag=None, item=res.get("id"), count=float(res.get("count", 1))))
 
+    # ── BotanyPots: seed + soil -> drops ──────────────────────────────────
+    elif rtype == "botanypots:crop":
+        seed = _slot_from_ingredient(data.get("input"))
+        if seed:
+            inputs.append(seed)
+        soil = _slot_from_ingredient(data.get("soil"))
+        if soil:
+            aux_inputs.append(soil)
+        drops = data.get("drops", [])
+        for drop in (drops if isinstance(drops, list) else [drops]):
+            if not isinstance(drop, dict) or drop.get("type") != "botanypots:items":
+                continue                      # loot tables can't be expanded statically
+            for it in drop.get("items", []):
+                res = it.get("result") if isinstance(it, dict) else None
+                sl = _entry_to_slot(res, True) if isinstance(res, dict) else None
+                if sl and sl.item:
+                    sl.count *= _num(it.get("chance"), 1.0)
+                    outputs.append(sl)
+        time_ticks = data.get("grow_time")
+
     # ── Crafting grid ─────────────────────────────────────────────────────
-    elif rtype in _SHAPED_TYPES:
-        key = data.get("key", {})
-        counts: dict[tuple, float] = {}
-        for row in data.get("pattern", []):
-            for ch in row:
-                ing = key.get(ch)
-                if ing is None:
-                    continue
-                sl = _slot_from_ingredient(ing)
-                if sl:
-                    counts[(sl.tag, sl.item)] = counts.get((sl.tag, sl.item), 0) + 1
-        inputs.extend(Slot(tag=t, item=i, count=c) for (t, i), c in counts.items())
-        outputs.extend(_output_slots(data.get("result")))
+    elif rtype in _SHAPED_TYPES or (isinstance(data.get("pattern"), list) and isinstance(data.get("key"), dict)):
+        _parse_grid(data, inputs, outputs)
 
     elif rtype in _SHAPELESS_TYPES:
         inputs.extend(_aggregate(_slot_from_ingredient(i) for i in data.get("ingredients", [])))
@@ -559,7 +638,7 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
             None,
         )
 
-    if not inputs or not outputs:
+    if not (inputs or aux_inputs) or not outputs:
         return None
 
     return Recipe(
@@ -639,6 +718,21 @@ class TagIndex:
 
     def items_for_tag(self, tag: str) -> set[str]:
         return self._tag_to_items.get(tag, set())
+
+    # Namespaces whose item wins when a recipe outputs a whole tag ("any c:dusts/iron"). Unified
+    # packs normally leave one obvious member; this only breaks ties.
+    PREFERRED_NAMESPACES = ("alltheores", "minecraft", "mekanism", "create", "thermal")
+
+    def canonical_item(self, tag: str) -> Optional[str]:
+        """One representative member of `tag`, or None if the tag is empty/unknown."""
+        members = self.items_for_tag(tag)
+        if not members:
+            return None
+        def rank(item: str):
+            ns = item.split(":")[0]
+            return (self.PREFERRED_NAMESPACES.index(ns) if ns in self.PREFERRED_NAMESPACES
+                    else len(self.PREFERRED_NAMESPACES), item)
+        return min(members, key=rank)
 
     def tags_for_item(self, item: str) -> set[str]:
         return self._item_to_tags.get(item, set())

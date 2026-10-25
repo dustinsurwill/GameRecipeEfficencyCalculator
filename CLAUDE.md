@@ -101,8 +101,13 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
 
 ## What to Work On Next
 
-1. **Parser long tail** (~7.4k recipes of unusual mod types are skipped) — e.g. Mekanism steel has no route yet.
-   Route ranking could still use real "obtainable" knowledge (what counts as a raw material is just "no recipe makes it").
+1. **Parser coverage** — 43.4k of 46.3k recipe files parse (`atm10_ore_analyzer.py`, structure-driven: any
+   pattern+key is a grid, `_INPUT_KEYS`/`_AUX_KEYS`/`_OUTPUT_KEYS` vocabularies, `basePredicate`/`result`
+   wrappers, chances, fluids as aux inputs; output tags are resolved on import via `TagIndex.canonical_item`).
+   The ~2.9k left are mostly not item flow (BotanyPots soils/block crops, enchantments, upgrades, spawners).
+   **Fluids are not part of the route graph** (melter -> casting chains can't be followed yet) and the
+   importer skips recipes whose `import_key` already exists, so re-import into a fresh DB after parser changes.
+   Route quality: items whose only producers are excluded (crafting) count as "raw" (e.g. armor -> ingot recycling).
 2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
 3. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (API exists, no page yet).
 4. **Email wiring** — fastapi-mail for verification and password reset.
