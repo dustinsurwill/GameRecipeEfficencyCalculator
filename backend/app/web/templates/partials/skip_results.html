@@ -1,0 +1,11 @@
+{% import "macros.html" as m %}
+{% macro row(kind, value, label, sub, ns) %}
+<button type="button" class="sr-row" role="option" aria-selected="false" hx-boost="false"
+        hx-get="{{ scope.url('/_skip_add') }}{{ qs(kind=kind, value=value) }}" hx-target="#skip-chips" hx-swap="beforeend">
+  {{ m.tile(label, ns, 26) }}
+  <span class="grow"><span class="bold small trunc">{{ label }}</span><span class="muted xs trunc">{{ sub }}</span></span>
+</button>
+{% endmacro %}
+{% for x in machines %}{{ row('machine', x.id, x.name, 'Machine · ' ~ x.mod_name, x.namespace) }}{% endfor %}
+{% for x in mods %}{{ row('mod', x.namespace, x.name, 'Mod · ' ~ x.recipe_count|num ~ ' recipes', x.namespace) }}{% endfor %}
+{% for x in items %}{{ row('item', x.item_id, x.name, 'Item · ' ~ x.mod_name, x.namespace) }}{% endfor %}

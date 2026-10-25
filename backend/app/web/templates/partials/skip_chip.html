@@ -1,0 +1,7 @@
+{% import "macros.html" as m %}
+<span class="skip-chip">
+  {{ m.tile(c.label, c.ns, 20) }}
+  <span class="trunc">{{ c.label }}</span><span class="muted xs">{{ c.sub }}</span>
+  <input type="hidden" name="{{ c.param }}" value="{{ c.value }}">
+  <button type="button" class="icon-btn" data-skip-remove aria-label="Stop skipping {{ c.label }}">✕</button>
+</span>

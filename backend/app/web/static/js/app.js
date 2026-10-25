@@ -45,6 +45,23 @@
     if (root) select(root, 0);
   });
 
+  // "Don't use" chips: remove on click; after adding one, clear the search and drop duplicates.
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-skip-remove]');
+    if (b) b.closest('.skip-chip').remove();
+  });
+  document.body.addEventListener('htmx:afterSwap', (e) => {
+    if (e.target.id !== 'skip-chips') return;
+    const seen = new Set();
+    e.target.querySelectorAll('input[type=hidden]').forEach((i) => {
+      const k = i.name + '=' + i.value;
+      if (seen.has(k)) i.closest('.skip-chip').remove(); else seen.add(k);
+    });
+    const root = e.target.closest('.field').querySelector('[data-search]');
+    root.querySelector('.sr-list').replaceChildren();
+    root.querySelector('input[name=q]').value = '';
+  });
+
   // Close the list when clicking elsewhere.
   document.addEventListener('click', (e) => {
     document.querySelectorAll('[data-search] .sr-list').forEach((l) => {

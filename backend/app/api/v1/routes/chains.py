@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from collections import defaultdict
@@ -69,18 +70,59 @@ class _Recipe:
     aux_inputs: list[_Slot] = field(default_factory=list)
 
 
-# ── Exclude filter ────────────────────────────────────────────────────────────
+# ── Exclusions ────────────────────────────────────────────────────────────────
 
-def _is_excluded(recipe: _Recipe, exclude: list[str]) -> bool:
-    rt = recipe.recipe_type
-    for rule in exclude:
-        if ":" in rule:
-            if rt == rule:
-                return True
-        else:
-            if rt.startswith(rule + ":"):
-                return True
-    return False
+class _Excluder:
+    """
+    What a search must not use. A recipe is blocked when any of these match:
+      types     'mekanism' (whole mod's recipe types) or 'mekanism:purifying' (one type)
+      machines  machine ids
+      items     item ids appearing in ANY slot of the recipe
+      mods      namespaces: recipe types of that mod, or any item from it in any slot
+    `keep` (the start/target items) is exempt from item and mod exclusion, otherwise skipping a mod
+    would make its own items unreachable. Results are memoised per recipe: one instance per search.
+    """
+
+    def __init__(
+        self, types: list[str] = (), machines: list[str] = (), items: list[str] = (),
+        mods: list[str] = (), keep: set[str] = frozenset(),
+    ) -> None:
+        self.types, self.machines = list(types), set(machines)
+        self.items, self.mods, self.keep = set(items), set(mods), keep
+        self._memo: dict[uuid.UUID, bool] = {}
+
+    def item_blocked(self, item_id: str) -> bool:
+        if item_id in self.keep:
+            return False
+        return item_id in self.items or item_id.split(":", 1)[0] in self.mods
+
+    def _slots_blocked(self, r: _Recipe) -> bool:
+        for group in (r.inputs, r.outputs, r.aux_inputs):
+            for s in group:
+                if s.item_id and self.item_blocked(s.item_id):
+                    return True
+        return False
+
+    def blocks(self, r: _Recipe) -> bool:
+        hit = self._memo.get(r.id)
+        if hit is not None:
+            return hit
+        rt = r.recipe_type
+        ns = rt.split(":", 1)[0]
+        blocked = (
+            ns in self.mods
+            or r.machine.id in self.machines
+            or any(rt == rule if ":" in rule else ns == rule for rule in self.types)
+            or self._slots_blocked(r)
+        )
+        self._memo[r.id] = blocked
+        return blocked
+
+    def describe(self) -> dict[str, list[str]]:
+        return {
+            "types": sorted(self.types), "machines": sorted(self.machines),
+            "items": sorted(self.items), "mods": sorted(self.mods),
+        }
 
 
 # ── DB loading ────────────────────────────────────────────────────────────────
@@ -293,7 +335,7 @@ def invalidate_graph_cache() -> None:
 
 def _resolve(value: str, tag_to_items: dict[str, set[str]]) -> list[str]:
     if value.startswith("#"):
-        return list(tag_to_items.get(value[1:], set()))
+        return sorted(tag_to_items.get(value[1:], set()))
     return [value]
 
 
@@ -305,12 +347,13 @@ class _Budget:
     """
 
     def __init__(
-        self, limit: int = 400_000, max_chains: int = 50_000, seconds: float = 15.0
+        self, limit: int = 400_000, max_chains: int = 50_000, seconds: float = 15.0,
+        deadline: float | None = None,
     ) -> None:
         self.left = limit
         self.chains = 0
         self.max_chains = max_chains
-        self.deadline = time.monotonic() + seconds
+        self.deadline = deadline if deadline is not None else time.monotonic() + seconds
         self.hit = False
 
     def spend(self) -> bool:
@@ -342,7 +385,7 @@ def _forward_dfs(
     start_items: list[str],
     target_items: set[str],
     graph: _RecipeGraph,
-    exclude: list[str],
+    excl: _Excluder,
     max_depth: int,
     allow_cycles: bool,
     budget: _Budget,
@@ -379,7 +422,7 @@ def _forward_dfs(
         tried: set[uuid.UUID] = set()
 
         for recipe in graph.recipes_consuming(item_id):
-            if recipe.id in tried or _is_excluded(recipe, exclude):
+            if recipe.id in tried or excl.blocks(recipe):
                 continue
             tried.add(recipe.id)
 
@@ -414,7 +457,7 @@ def _forward_dfs(
 def _backward_dfs(
     target_items: list[str],
     graph: _RecipeGraph,
-    exclude: list[str],
+    excl: _Excluder,
     max_depth: int,
     allow_cycles: bool,
     budget: _Budget,
@@ -442,7 +485,7 @@ def _backward_dfs(
                 cycles_excluded += 1
             return
 
-        producing = [r for r in graph.recipes_producing(item_id) if not _is_excluded(r, exclude)]
+        producing = [r for r in graph.recipes_producing(item_id) if not excl.blocks(r)]
 
         if not producing:
             # Leaf — item_id is a raw material
@@ -466,9 +509,10 @@ def _backward_dfs(
                 if in_slot.item_id:
                     input_items = [in_slot.item_id]
                 elif in_slot.tag_string:
-                    input_items = list(graph.tag_to_items.get(in_slot.tag_string, set()))
+                    input_items = sorted(graph.tag_to_items.get(in_slot.tag_string, ()))
                 else:
                     continue
+                input_items = [i for i in input_items if not excl.item_blocked(i)]
 
                 for input_item in input_items:
                     dfs(
@@ -485,27 +529,85 @@ def _backward_dfs(
     return all_chains, cycles_excluded
 
 
+# ── Iterative deepening + ranking ─────────────────────────────────────────────
+# A plain depth-12 DFS spends its whole budget in the first branch it enters and never sees the short
+# routes. Searching depth 1, 2, 3 … instead means the cheapest routes are always found first, and a
+# later, truncated pass can only add to a complete shallower one.
+
+ENOUGH_CHAINS = 400  # stop deepening once a complete pass has found this many routes
+
+
+def _deepen(run, max_depth: int, enough: int = ENOUGH_CHAINS, seconds: float = 15.0):
+    """`run(depth, budget) -> (chains, cycles_excluded)`. Returns (chains, cycles_excluded, truncated)."""
+    deadline = time.monotonic() + seconds
+    done: list = []
+    cycles = 0
+    for depth in range(1, max_depth + 1):
+        budget = _Budget(deadline=deadline)
+        chains, cycles = run(depth, budget)
+        if budget.hit:
+            return done + chains, cycles, True
+        done = chains
+        if len(done) >= enough:
+            break
+    return done, cycles, False
+
+
+def _route_cost(steps: list[tuple[_Recipe, float]], ratio: float, higher_is_better: bool) -> float:
+    """
+    Lower is better. Fewer steps dominate, then fewer distinct machines (each is something to build
+    and feed), then the item ratio on a log scale. The ratio is floored at 0.25 so a long chain
+    through some high-multiplier recipe (seeds, lenses) cannot buy its way to the top with a
+    fraction like 0.01 raw per item.
+    """
+    machines = len({r.machine.id for r, _ in steps})
+    ratio_term = 0.4 * math.log2(max(ratio, 0.25))
+    return len(steps) + 0.5 * machines + (-ratio_term if higher_is_better else ratio_term)
+
+
 # ── Deduplication ─────────────────────────────────────────────────────────────
 
-def _dedup_forward(
-    chains: list[tuple[list, bool, int | None]],
+def _sequence(chain: list[tuple[_Recipe, float]], leaf: str = "") -> tuple:
+    """Identity of a route for de-duplication: the machines used, in order, and where it starts.
+    Two crafting recipes that differ only in layout are the same route to a player."""
+    return tuple(r.machine.id for r, _ in chain) + (leaf,)
+
+
+def _rank_forward(
+    chains: list[tuple[list, bool, int | None]], target_items: set[str],
 ) -> list[tuple[list, bool, int | None]]:
-    seen: dict[tuple, tuple] = {}
-    for chain, has_cycle, cycle_step in chains:
-        key = tuple((r.import_key, round(runs, 6)) for r, runs in chain)
-        seen.setdefault(key, (chain, has_cycle, cycle_step))
-    return list(seen.values())
+    """Best route per distinct recipe sequence, cheapest first (loops last)."""
+    best: dict[tuple, tuple[tuple, tuple]] = {}
+    for entry in chains:
+        chain, has_cycle, _ = entry
+        if not chain:
+            continue
+        if has_cycle:
+            cost = (True, _route_cost(chain, 0.0, True))
+        else:
+            r_last, runs_last = chain[-1]
+            y = sum(s.quantity * runs_last for s in r_last.outputs if s.item_id in target_items)
+            cost = (False, _route_cost(chain, y, True))
+        key = _sequence(chain)
+        if key not in best or cost < best[key][0]:
+            best[key] = (cost, entry)
+    return [e for _, e in sorted(best.values(), key=lambda v: v[0])]
 
 
-def _dedup_backward(
+def _rank_backward(
     chains: list[tuple[list, bool, int | None, str, float]],
 ) -> list[tuple[list, bool, int | None, str, float]]:
-    seen: dict[tuple, tuple] = {}
+    """Best route per distinct recipe sequence, cheapest first (loops last). Zero-step 'routes' are dropped."""
+    best: dict[tuple, tuple[tuple, tuple]] = {}
     for entry in chains:
-        chain, has_cycle, cycle_step, raw_item, raw_qty = entry
-        key = tuple((r.import_key, round(runs, 6)) for r, runs in chain) + (raw_item,)
-        seen.setdefault(key, entry)
-    return list(seen.values())
+        chain, has_cycle, _, raw_item, raw_qty = entry
+        if not chain:
+            continue
+        cost = (has_cycle, _route_cost(chain, raw_qty, False), raw_qty)
+        key = _sequence(chain, raw_item)
+        if key not in best or cost < best[key][0]:
+            best[key] = (cost, entry)
+    return [e for _, e in sorted(best.values(), key=lambda v: v[0])]
 
 
 # ── Serialization ─────────────────────────────────────────────────────────────
@@ -907,6 +1009,9 @@ async def get_chains(
     game: str | None = Query(default=None, description="Game UUID or slug"),
     game_version: str | None = Query(default=None, description="Game version UUID or version string"),
     exclude: list[str] = Query(default=[], description="Namespace ('mekanism') or recipe_type ('mekanism:purifying') to exclude"),
+    exclude_machine: list[str] = Query(default=[], description="Machine ids whose recipes must not be used"),
+    exclude_item: list[str] = Query(default=[], description="Item ids no recipe in the route may touch"),
+    exclude_mod: list[str] = Query(default=[], description="Mod namespaces: skip their recipe types and any recipe using their items"),
     allow_cycles: bool = Query(default=False),
     max_depth: int = Query(default=8, ge=1, le=12),
     limit: int = Query(default=50, ge=1, le=200),
@@ -937,27 +1042,16 @@ async def get_chains(
         if not start_items:
             return _empty_result(scope_info, target, start, "No items found for start")
 
+        excl = _Excluder(exclude, exclude_machine, exclude_item, exclude_mod, keep=target_items_set | set(start_items))
         async with _search_slots:
-            budget = _Budget()
-            raw_chains, cycles_excluded = await asyncio.to_thread(
-                _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles, budget,
+            raw_chains, cycles_excluded, truncated = await asyncio.to_thread(
+                _deepen,
+                lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b),
+                max_depth,
             )
-        raw_chains = _dedup_forward(raw_chains)
+        raw_chains = _rank_forward(raw_chains, target_items_set)
         memory.trim()
         total_found = len(raw_chains)
-
-        def _yield_key(entry: tuple) -> float:
-            chain, has_cycle, _ = entry
-            if has_cycle or not chain:
-                return 0.0
-            recipe_last, runs_last = chain[-1]
-            return sum(
-                s.quantity * runs_last
-                for s in recipe_last.outputs
-                if s.item_id and s.item_id in target_items_set
-            )
-
-        raw_chains.sort(key=_yield_key, reverse=True)
         paged = raw_chains[:limit]
 
         serialized = [
@@ -977,16 +1071,17 @@ async def get_chains(
     else:
         direction = "backward"
 
+        excl = _Excluder(exclude, exclude_machine, exclude_item, exclude_mod, keep=target_items_set)
         async with _search_slots:
-            budget = _Budget()
-            raw_chains_b, cycles_excluded = await asyncio.to_thread(
-                _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles, budget,
+            raw_chains_b, cycles_excluded, truncated = await asyncio.to_thread(
+                _deepen,
+                lambda d, b: _backward_dfs(target_items_list, graph, excl, d, allow_cycles, b),
+                max_depth,
             )
-        raw_chains_b = _dedup_backward(raw_chains_b)
+        raw_chains_b = _rank_backward(raw_chains_b)
         memory.trim()
         total_found = len(raw_chains_b)
 
-        raw_chains_b.sort(key=lambda e: (e[1], e[4]))  # (has_cycle, raw_qty)
         paged_b = raw_chains_b[:limit]
 
         serialized = [
@@ -1016,7 +1111,8 @@ async def get_chains(
         "cycles_found": cycles_found,
         "cycles_excluded": cycles_excluded,
         "excluded_applied": exclude,
-        "truncated": budget.hit,
+        "excluded": excl.describe(),
+        "truncated": truncated,
         "chains": serialized,
     }
 

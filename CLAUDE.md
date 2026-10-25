@@ -86,6 +86,13 @@ builds/searches. Run ONE uvicorn worker: caches are per process.
 
 ## Chain Calculation
 
+Search is iterative deepening (depth 1, 2, 3 …, stops once a complete pass has ~400 routes) so short routes are
+never starved by a deep one. Routes are ranked by `_route_cost` (steps, then distinct machines, then log ratio
+floored at 0.25) and de-duplicated by machine sequence + start item. `_Excluder` handles skips: recipe types,
+machine ids, items (any slot), mods (recipe types + any item); target/start are exempt. The /routes page has an
+"Advanced options" panel for these; `DEFAULT_SKIP_RECIPE_TYPES` in `web/pages.py` (Mystical Agriculture
+reprocessor) applies until the form is submitted.
+
 The DFS in `chains.py` is CPU-bound and runs in `asyncio.to_thread()` behind a 2-slot semaphore, over a
 graph cached per scope (`_get_graph`). Responses include `"truncated": true` when a cap was hit.
 Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import (both also expire on a TTL).
@@ -94,9 +101,8 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
 
 ## What to Work On Next
 
-1. **Route-finder ranking** — backward search surfaces essence/reprocessor routes first; needs a cost model
-   (prefer fewer machines, avoid "essence" intermediates) and tag-aware pruning. Parser long tail (~7.4k recipes
-   of unusual mod types) is still skipped.
+1. **Parser long tail** (~7.4k recipes of unusual mod types are skipped) — e.g. Mekanism steel has no route yet.
+   Route ranking could still use real "obtainable" knowledge (what counts as a raw material is just "no recipe makes it").
 2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
 3. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (API exists, no page yet).
 4. **Email wiring** — fastapi-mail for verification and password reset.

@@ -34,6 +34,9 @@ CRAFTING_TYPES = [
     "minecraft:crafting_shaped", "minecraft:crafting_shapeless", "crafting_shaped",
     "crafting_shapeless", "kubejs:shaped", "kubejs:shapeless",
 ]
+# Route searches skip these recipe types unless the user changes the Advanced options. The Mystical
+# Agriculture reprocessor turns any seed into any essence, so it otherwise dominates every route.
+DEFAULT_SKIP_RECIPE_TYPES = ("mysticalagriculture:reprocessor",)
 Idx = Depends(web_index)
 Sc = Depends(web_scope)
 
@@ -251,33 +254,82 @@ async def tag_page(
 
 # ── Route finder ──────────────────────────────────────────────────────────────
 
+def _default_skip_machines(idx: DiscoveryIndex) -> list[str]:
+    return [m["id"] for m in idx.machines if any(t in DEFAULT_SKIP_RECIPE_TYPES for t in m["recipe_types"])]
+
+
+def _skip_chip(idx: DiscoveryIndex, kind: str, value: str) -> dict[str, str] | None:
+    """Display data for one 'skip this' entry, or None if it doesn't exist in this scope."""
+    if kind == "machine":
+        try:
+            m = idx.machines_by_id.get(uuid.UUID(value))
+        except ValueError:
+            return None
+        return {"kind": "machine", "param": "xm", "value": value, "label": m["name"], "sub": "machine", "ns": m["namespace"]} if m else None
+    if kind == "mod":
+        m = idx.mods_by_ns.get(value)
+        return {"kind": "mod", "param": "xmod", "value": value, "label": m["name"], "sub": "mod", "ns": value} if m else None
+    if kind == "item":
+        i = idx.by_item_id.get(value)
+        return {"kind": "item", "param": "xi", "value": value, "label": i["name"], "sub": "item", "ns": i["namespace"]} if i else None
+    return None
+
+
 @router.get("/{game}/{pack}/{version}/routes")
 async def routes_page(
     request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx,
     session: AsyncSession = Depends(get_session),
     target: str = "", start: str = "", depth: int = Query(6, ge=1, le=10), crafting: str = "", ran: str = "",
+    xm: list[str] = Query([]), xmod: list[str] = Query([]), xi: list[str] = Query([]),
 ):
-    # `crafting` is a checkbox; `ran` marks a submitted form so an unchecked box means "include".
+    # `ran` marks a submitted form: an unchecked box then means "include", and empty skip lists mean "skip nothing".
     skip_crafting = bool(crafting) if ran else True
+    defaults = _default_skip_machines(idx)
+    if not ran:
+        xm = defaults
+    skips = [c for kind, vals in (("machine", xm), ("mod", xmod), ("item", xi)) for v in dict.fromkeys(vals)
+             if (c := _skip_chip(idx, kind, v))]
     sel_target = idx.by_item_id.get(target)
     sel_start = idx.by_item_id.get(start)
     result, error = None, None
     if ran and not sel_target:
         error = "Pick the item you want to make."
     elif sel_target:
+        pick = lambda kind: [c["value"] for c in skips if c["kind"] == kind]  # noqa: E731
         try:
             result = await chains.get_chains(
                 session=session, target=target, start=start or None,
                 modpack=str(scope.pack_id), modpack_version=str(scope.version_id), mod=[], game=None,
-                game_version=None, exclude=CRAFTING_TYPES if skip_crafting else [], allow_cycles=False,
-                max_depth=depth, limit=25, quantity=1.0,
+                game_version=None, exclude=CRAFTING_TYPES if skip_crafting else [],
+                exclude_machine=pick("machine"), exclude_item=pick("item"), exclude_mod=pick("mod"),
+                allow_cycles=False, max_depth=depth, limit=25, quantity=1.0,
             )
         except HTTPException as e:
             error = str(e.detail)
+    changed = bool(ran) and (set(xm) != set(defaults) or bool(xmod) or bool(xi) or not skip_crafting or depth != 6)
     return render(
         request, "routes.html", scope=scope, target=sel_target, start=sel_start, depth=depth,
-        skip_crafting=skip_crafting, result=result, error=error, idx=idx,
+        skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed,
     )
+
+
+@router.get("/{game}/{pack}/{version}/_skip")
+async def skip_results(request: Request, q: str = "", scope: Scope = Sc, idx: DiscoveryIndex = Idx):
+    needle = q.strip().lower()
+    if len(needle) < 2:
+        return render(request, "partials/skip_results.html", scope=scope, machines=[], mods=[], items=[])
+    return render(
+        request, "partials/skip_results.html", scope=scope,
+        machines=idx.search_machines(needle, 5), mods=idx.search_mods(needle, 4), items=idx.search_items(needle, 5),
+    )
+
+
+@router.get("/{game}/{pack}/{version}/_skip_add")
+async def skip_add(request: Request, kind: str, value: str, scope: Scope = Sc, idx: DiscoveryIndex = Idx):
+    chip = _skip_chip(idx, kind, value)
+    if not chip:
+        raise HTTPException(404, "Nothing to skip")
+    return render(request, "partials/skip_chip.html", scope=scope, c=chip)
 
 
 @router.get("/{game}/{pack}/{version}/_pick")

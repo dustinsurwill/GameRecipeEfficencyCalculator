@@ -216,3 +216,10 @@ table.t th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 @media (max-width: 767px) { .hide-sm { display: none; } }
+
+/* route finder: advanced options */
+.adv { border-top: 1px solid var(--border); padding-top: 0.75rem; }
+.adv > summary { cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+.skip-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.skip-chips:empty { display: none; }
+.skip-chip { display: inline-flex; align-items: center; gap: 0.4rem; max-width: 100%; padding: 0.2rem 0.3rem 0.2rem 0.4rem; background: var(--background); border: 1px solid var(--border); border-radius: 999px; font-size: 0.85rem; }

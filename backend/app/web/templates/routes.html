@@ -22,10 +22,27 @@
       <div class="field"><span>Start with <span class="field-hint">· optional</span></span>{% with which='start', item=start %}{% include "partials/picker.html" %}{% endwith %}</div>
       <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
     </div>
+    <details class="adv" {{ 'open' if advanced_open }}>
+      <summary>Advanced options <span class="muted small">· skipping {{ skips|length + (1 if skip_crafting else 0) }}</span></summary>
+      <div class="stack" style="gap:.9rem;padding-top:.75rem">
+        <div class="row">
+          <label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>
+          <label class="row small">Max steps
+            <select name="depth">{% for n in [3, 4, 5, 6, 8, 10] %}<option value="{{ n }}" {{ 'selected' if n == depth }}>{{ n }}</option>{% endfor %}</select></label>
+        </div>
+        <div class="field">
+          <span>Don't use <span class="field-hint">· routes will avoid these machines, mods and items entirely</span></span>
+          <div id="skip-chips" class="skip-chips">{% for c in skips %}{% include "partials/skip_chip.html" %}{% endfor %}</div>
+          <div class="search" data-search>
+            <input type="search" name="q" form="no-form" placeholder="Search a machine, mod or item to skip…" aria-label="Search for something to skip" autocomplete="off"
+                   hx-get="{{ scope.url('/_skip') }}" hx-trigger="input changed delay:150ms" hx-target="next .sr-list" hx-swap="innerHTML" hx-boost="false">
+            <div class="sr-list" role="listbox"></div>
+          </div>
+          <p class="muted xs">The Mystical Agriculture Reprocessor is skipped by default: it turns any seed into any essence, which otherwise dominates the results. Remove it to allow those routes.</p>
+        </div>
+      </div>
+    </details>
     <div class="row">
-      <label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>
-      <label class="row small">Max steps
-        <select name="depth">{% for n in [3, 4, 5, 6, 8, 10] %}<option value="{{ n }}" {{ 'selected' if n == depth }}>{{ n }}</option>{% endfor %}</select></label>
       <span id="busy" class="htmx-indicator muted small">Searching…</span>
       <button class="btn primary-btn" style="margin-left:auto" type="submit">Find routes</button>
     </div>
@@ -35,10 +52,10 @@
 
   {% if result %}
     {% if result.total_found == 0 %}
-      <p class="empty">{{ result.note or 'No routes found. Try more steps, or allow crafting-table recipes.' }}</p>
+      <p class="empty">{{ result.note or 'No routes found. Try more steps, or remove something from the skip list in Advanced options.' }}</p>
     {% else %}
       <p class="muted small">
-        {{ result.total_found|num }} route{{ '' if result.total_found == 1 else 's' }} found, showing the best {{ result.returned }}.
+        {{ result.total_found|num }} different route{{ '' if result.total_found == 1 else 's' }} found{% if result.total_found > result.returned %}, showing the {{ result.returned }} simplest{% endif %} — fewest steps and machines first.
         {% if result.truncated %}<span class="primary">The search stopped early because this item has a very large number of routes — lower the step limit or ignore crafting recipes to narrow it.</span>{% endif %}
       </p>
       {% for chain in result.chains %}
