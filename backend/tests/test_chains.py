@@ -2,7 +2,7 @@
 import uuid
 
 from app.api.v1.routes.chains import (
-    _backward_dfs, _deepen, _Excluder, _forward_dfs, _link_inputs, _MachineInfo, _rank_backward,
+    _backward_dfs, _Budget, _deepen, _Excluder, _forward_dfs, _link_inputs, _MachineInfo, _rank_backward,
     _rank_forward, _Recipe, _RecipeGraph, _Slot,
 )
 
@@ -160,3 +160,21 @@ def test_fluid_side_inputs_flag_a_route_but_chemicals_do_not():
     assert not _has_side_inputs([(wash, 1.0)])
     melt, cast_only = melt_cast()
     assert not _has_side_inputs([(melt, 1.0), (cast_only, 1.0)])
+
+
+def test_forward_search_prunes_branches_that_cannot_reach_the_target():
+    from app.api.v1.routes.chains import _steps_to
+    # a 6-step chain to the target, plus a wide dead-end tree hanging off the start item
+    chain = [rec(f"t:{i}", f"m{i}", [(f"c:{i}", 1)], [(f"c:{i + 1}", 1)]) for i in range(6)]
+    junk = [rec("t:j", f"j{i}", [("c:0", 1)], [(f"junk:{i}", 1)]) for i in range(30)]
+    junk += [rec("t:jj", f"jj{i}", [(f"junk:{i % 30}", 1)], [(f"junk2:{i}", 1)]) for i in range(300)]
+    g = graph(*chain, *junk)
+    steps = _steps_to({"c:6"}, g, _Excluder())
+    assert steps["c:0"] == 6 and "junk:1" not in steps
+    visits = []
+    for pruned in (None, steps):
+        b = _Budget()
+        found, _ = _forward_dfs(["c:0"], {"c:6"}, g, _Excluder(), 6, False, b, pruned)
+        assert len(found) == 1
+        visits.append(b.left)
+    assert visits[1] > visits[0]      # fewer nodes spent when pruned

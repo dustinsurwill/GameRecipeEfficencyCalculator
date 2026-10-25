@@ -75,7 +75,7 @@ DEBUG=false uv run python -m app.importer --export-dir ../allthemons_export
 
 Production target is < 8 GB total; the compose file caps the backend at 2 GB. A single process holds:
 baseline ~100 MB, one scope's index ~90 MB, one scope's recipe graph ~230 MB; at most 2 of each are cached
-(`MAX_INDEXES`, `_GRAPH_MAX`). Route searches are bounded three ways in `_Budget`: 400k node visits,
+(`MAX_INDEXES`, `_GRAPH_MAX`). Route searches are bounded three ways in `_Budget`: 3M node visits,
 50k collected chains, 15 s wall clock — they run in threads that cannot be cancelled, so without these a
 deep search kept allocating (~40 MB/s) long after the client disconnected (this is how a process reached 64 GB).
 Concurrent searches are limited to 2 (`_search_slots`). `memory.trim()` returns freed heap to the OS after
@@ -86,6 +86,8 @@ builds/searches. Run ONE uvicorn worker: caches are per process.
 
 ## Chain Calculation
 
+Forward searches (a start item is given) prune with `_steps_to` (fewest steps from each item to the target, so branches that cannot
+reach it in the remaining depth are dropped) and collect each machine sequence a few times only (`_SeqCounter`).
 Search is iterative deepening (depth 1, 2, 3 …, stops once a complete pass has ~400 routes) so short routes are
 never starved by a deep one. Routes are ranked by `_route_cost` (steps, then distinct machines, then log ratio
 floored at 0.25) and de-duplicated by machine sequence + start item. `_Excluder` handles skips: recipe types,

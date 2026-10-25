@@ -299,6 +299,17 @@ class _RecipeGraph:
                     for item_id in tag_to_items.get(slot.tag_string, set()):
                         self._by_input[item_id].append(r)
 
+    def forward_sources(self, r: _Recipe) -> list[str]:
+        """Items from which the forward search can enter this recipe (see __init__)."""
+        out: list[str] = []
+        primary = next((x for x in r.inputs if not x.is_fluid), None)
+        for slot in ([primary] if primary else []) + [g for g in r.gin if g.is_fluid]:
+            if slot.item_id:
+                out.append(slot.item_id)
+            elif slot.tag_string:
+                out.extend(self.tag_to_items.get(slot.tag_string, ()))
+        return out
+
     def recipes_consuming(self, item_id: str) -> list[_Recipe]:
         return self._by_input.get(item_id, [])
 
@@ -372,7 +383,7 @@ class _Budget:
     """
 
     def __init__(
-        self, limit: int = 400_000, max_chains: int = 50_000, seconds: float = 15.0,
+        self, limit: int = 3_000_000, max_chains: int = 50_000, seconds: float = 15.0,
         deadline: float | None = None,
     ) -> None:
         self.left = limit
@@ -413,6 +424,47 @@ def _consumed(recipe: _Recipe, item_id: str, tag_to_items: dict[str, set[str]]) 
     return total
 
 
+class _SeqCounter:
+    """Lets each distinct machine sequence be collected a few times (the best-yield variant differs by
+    recipe choice) but no more: thousands of crafting-layout or equivalent-recipe variants of one route
+    otherwise fill the chain cap before deeper, genuinely different routes are reached."""
+
+    def __init__(self, per_sequence: int = 4) -> None:
+        self._n: dict[tuple, int] = {}
+        self._cap = per_sequence
+
+    def add(self, key: tuple) -> bool:
+        n = self._n.get(key, 0)
+        if not n and len(self._n) >= 300_000:     # bound memory: past this, new keys are not tracked
+            return True
+        if n >= self._cap:
+            return False
+        self._n[key] = n + 1
+        return True
+
+
+def _steps_to(targets: set[str], graph: _RecipeGraph, excl: _Excluder) -> dict[str, int]:
+    """Fewest recipe steps from each item to any target, following the same edges the forward search
+    uses. A forward DFS that does not know this spends nearly all of its budget in branches that can
+    never reach the target; with it, a branch is dropped as soon as depth + steps_to > max_depth."""
+    producers = graph.recipes_producing
+    dist = {t: 0 for t in targets}
+    frontier = list(targets)
+    while frontier:
+        nxt = []
+        for item in frontier:
+            d = dist[item] + 1
+            for r in producers(item):
+                if excl.blocks(r):
+                    continue
+                for src in graph.forward_sources(r):
+                    if src not in dist and not (src in targets):
+                        dist[src] = d
+                        nxt.append(src)
+        frontier = nxt
+    return dist
+
+
 # ── Forward DFS ───────────────────────────────────────────────────────────────
 # Each chain: list of (recipe, runs) in execution order.
 # `runs` = how many times that recipe runs, starting from 1.0 unit of start_item.
@@ -425,9 +477,12 @@ def _forward_dfs(
     max_depth: int,
     allow_cycles: bool,
     budget: _Budget,
+    steps_to: dict[str, int] | None = None,
 ) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None]], int]:
     all_chains: list[tuple[list, bool, int | None]] = []
     cycles_excluded = 0
+    seen = _SeqCounter()
+    states = _SeqCounter(3)
 
     def dfs(
         item_id: str,
@@ -440,10 +495,15 @@ def _forward_dfs(
 
         if depth > max_depth or not budget.spend():
             return
+        if steps_to is not None and depth + steps_to.get(item_id, max_depth + 1) > max_depth:
+            return
 
+        if not states.add((item_id, _sequence(steps))):
+            return      # same item reached through the same machines already; only recipe variants differ
         if item_id in target_items:
-            all_chains.append((list(steps), False, None))
-            budget.add_chain()
+            if seen.add(_sequence(steps)):
+                all_chains.append((list(steps), False, None))
+                budget.add_chain()
             return
 
         if item_id in path:
@@ -1113,10 +1173,11 @@ async def get_chains(
             return _empty_result(scope_info, target, start, "No items found for start")
 
         excl = _Excluder(exclude, exclude_machine, exclude_item, exclude_mod, keep=target_items_set | set(start_items))
+        steps_to = await asyncio.to_thread(_steps_to, target_items_set, graph, excl)
         async with _search_slots:
             raw_chains, cycles_excluded, truncated = await asyncio.to_thread(
                 _deepen,
-                lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b),
+                lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b, steps_to),
                 max_depth, enough,
             )
         raw_chains = _rank_forward(raw_chains, target_items_set, by_yield)
