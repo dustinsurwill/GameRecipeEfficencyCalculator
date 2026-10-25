@@ -105,8 +105,10 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    pattern+key is a grid, `_INPUT_KEYS`/`_AUX_KEYS`/`_OUTPUT_KEYS` vocabularies, `basePredicate`/`result`
    wrappers, chances, fluids as aux inputs; output tags are resolved on import via `TagIndex.canonical_item`).
    The ~2.9k left are mostly not item flow (BotanyPots soils/block crops, enchantments, upgrades, spawners).
-   **Fluids are not part of the route graph** (melter -> casting chains can't be followed yet) and the
-   importer skips recipes whose `import_key` already exists, so re-import into a fresh DB after parser changes.
+   Fluids and chemicals are stored as item appearances with ids `fluid:ns:name` / `chemical:ns:name` (still/flowing
+   variants merged, fluid tags from `tags/minecraft/fluid`) and ARE route-graph nodes (`_Recipe.gin`); water is free,
+   non-consumed casts are not followed, chemicals don't count as side inputs. The importer skips recipes whose
+   `import_key` already exists, so after parser changes `TRUNCATE recipe_slots, recipe_mod_version_links, recipes CASCADE` and re-import.
    Route quality: items whose only producers are excluded (crafting) count as "raw" (e.g. armor -> ingot recycling).
 2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
 3. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (API exists, no page yet).

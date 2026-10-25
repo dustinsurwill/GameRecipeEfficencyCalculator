@@ -6,7 +6,7 @@
 
 {% macro item_card(it, scope, show_mod=True) %}
 <a class="item-card" href="{{ scope.url('/items/' ~ (it.item_id|urlq)) }}">
-  {{ tile(it.name, it.namespace, 40) }}
+  {{ tile(it.name, it.namespace, 40, fluid=(it.kind != 'item')) }}
   <span class="t grow">
     <span class="name trunc">{{ it.name }}</span>
     {% if show_mod %}<span class="muted xs trunc" style="display:block">{{ it.mod_name }}</span>{% endif %}
@@ -20,7 +20,7 @@
 
 {% macro slot_chip(s, scope, highlight=None) %}
 {%- set label = s.name if (s.item_id or s.is_fluid) else (s.tag|tag_label) -%}
-{%- set ns = (s.item_id or s.tag or s.fluid_label or '').split(':')[0] -%}
+{%- set ns = (s.item_id or s.tag or s.fluid_label or '')|ns_of -%}
 {%- set hit = highlight and (s.item_id == highlight or s.via_tag) -%}
 {%- if s.item_id -%}{%- set href = scope.url('/items/' ~ (s.item_id|urlq)) -%}
 {%- elif s.tag -%}{%- set href = scope.url('/tag?id=' ~ (s.tag|urlq)) -%}

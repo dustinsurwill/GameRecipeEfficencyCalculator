@@ -16,6 +16,13 @@
         <option value="used_in" {{ 'selected' if f.sort == 'used_in' }}>Most used in recipes</option>
         <option value="made_by" {{ 'selected' if f.sort == 'made_by' }}>Most ways to make</option>
       </select></label>
+    <label class="row small">Type
+      <select name="kind">
+        <option value="">All</option>
+        <option value="item" {{ 'selected' if f.kind == 'item' }}>Items</option>
+        <option value="fluid" {{ 'selected' if f.kind == 'fluid' }}>Fluids</option>
+        <option value="chemical" {{ 'selected' if f.kind == 'chemical' }}>Chemicals</option>
+      </select></label>
     <label class="inline"><input type="checkbox" name="craftable" value="1" {{ 'checked' if f.craftable }}> Has a recipe</label>
     {% if f.mod %}<input type="hidden" name="mod" value="{{ f.mod }}">{% endif %}
     {% if f.tag %}<input type="hidden" name="tag" value="{{ f.tag }}">{% endif %}
@@ -25,13 +32,13 @@
   <div id="results" class="stack">
     {% if f.mod or f.tag %}
     <div class="row small">
-      {% if f.mod %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable)) }}">Mod: {{ f.mod }} ✕</a>{% endif %}
-      {% if f.tag %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, mod=f.mod, sort=f.sort if f.sort != 'name', craftable=f.craftable)) }}">Tag: #{{ f.tag }} ✕</a>{% endif %}
+      {% if f.mod %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable, kind=f.kind)) }}">Mod: {{ f.mod }} ✕</a>{% endif %}
+      {% if f.tag %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, mod=f.mod, sort=f.sort if f.sort != 'name', craftable=f.craftable, kind=f.kind)) }}">Tag: #{{ f.tag }} ✕</a>{% endif %}
     </div>
     {% endif %}
     {% if items %}
     <div class="grid cols-3">{% for it in items %}{{ m.item_card(it, scope) }}{% endfor %}</div>
-    {{ m.pager(page, pages, scope.url('/items' ~ qs(q=f.q, mod=f.mod, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable))) }}
+    {{ m.pager(page, pages, scope.url('/items' ~ qs(q=f.q, mod=f.mod, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable, kind=f.kind))) }}
     {% else %}<p class="empty">No items match. Try a shorter search or clear the filters.</p>{% endif %}
   </div>
 </div>

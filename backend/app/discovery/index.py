@@ -36,6 +36,11 @@ def pretty_name(ident: str) -> str:
     return path.replace("/", " / ").replace("_", " ").title()
 
 
+def item_kind(item_id: str) -> str:
+    """'item', 'fluid' or 'chemical' (fluids/chemicals are stored as 'fluid:ns:name' / 'chemical:ns:name')."""
+    return item_id.split(":", 1)[0] if item_id.startswith(("fluid:", "chemical:")) else "item"
+
+
 def _namespace_of(recipe_type: str) -> str:
     return recipe_type.split(":")[0] if ":" in recipe_type else "minecraft"
 
@@ -124,6 +129,7 @@ class DiscoveryIndex:
                 "namespace": app.namespace,
                 "mod_name": mod_name.get(app.namespace, pretty_name(app.namespace)),
                 "tags": tags,
+                "kind": item_kind(app.item_id),
                 "made_by": made_by.get(app.id, 0),
                 "used_in": used_direct.get(app.id, 0) + sum(tag_recipe_counts.get(t, 0) for t in tags),
             }
@@ -180,11 +186,13 @@ class DiscoveryIndex:
 
     def filter_items(
         self, *, q: str | None = None, mod: str | None = None, tag: str | None = None,
-        craftable: bool | None = None, sort: str = "name",
+        craftable: bool | None = None, sort: str = "name", kind: str | None = None,
     ) -> list[dict[str, Any]]:
         needle = q.strip().lower() if q else ""
         out = []
         for item, (lname, lid) in zip(self.items, self._keys):
+            if kind and item["kind"] != kind:
+                continue
             if mod and item["namespace"] != mod:
                 continue
             if tag and tag not in item["tags"]:

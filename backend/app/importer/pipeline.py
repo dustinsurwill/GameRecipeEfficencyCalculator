@@ -46,7 +46,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from atm10_ore_analyzer import (
     MACHINE_NAMES,
     TagIndex,
+    graph_id,
     load_all_recipes,
+    load_fluid_tags,
     load_tags,
     machine_name,
     parse_recipe,
@@ -188,8 +190,18 @@ async def _ensure_modpack_mod_version_link(
 
 # ── Identity helpers ──────────────────────────────────────────────────────────
 
+def _bare(item_id: str) -> str:
+    """'fluid:oritech:molten_fluxite' -> 'oritech:molten_fluxite' (items are returned unchanged)."""
+    for prefix in ("fluid:", "chemical:"):
+        if item_id.startswith(prefix):
+            return item_id[len(prefix):]
+    return item_id
+
+
 def _derive_canonical_name(item_id: str, item_tags: set[str]) -> str:
     """Derive a human-readable canonical name from an item_id + its tags."""
+    if item_id != _bare(item_id):          # fluids/chemicals: tags like c:ingots/* don't apply
+        return _bare(item_id).partition(":")[2].replace("/", " ").replace("_", " ").title()
     for tag in sorted(item_tags):
         if tag.startswith("c:ingots/"):
             ore = tag.split("/")[-1].replace("_", " ").title()
@@ -214,7 +226,7 @@ def _derive_canonical_name(item_id: str, item_tags: set[str]) -> str:
 async def _get_or_create_item_identity(
     session: AsyncSession, game: Game, item_id: str, item_tags: set[str]
 ) -> ItemIdentity:
-    ns = item_id.split(":")[0]
+    ns = _bare(item_id).split(":")[0]
     result = await session.exec(
         select(ItemIdentity).where(
             ItemIdentity.game_id == game.id,
@@ -257,7 +269,7 @@ async def _get_or_create_item_appearance(
             identity_id=identity.id,
             mod_version_id=mod_version.id,
             item_id=item_id,
-            namespace=item_id.split(":")[0],
+            namespace=_bare(item_id).split(":")[0],
             tags_json=json.dumps(sorted(tags)),
         )
         session.add(appearance)
@@ -306,6 +318,7 @@ async def _import_recipe(
     mod_version: ModVersion,
     modpack: ModPackVersion,
     tag_index: TagIndex,
+    fluid_tags: TagIndex,
     is_modpack_recipe: bool,
     item_mod_versions: dict[str, ModVersion],
 ) -> None:
@@ -352,13 +365,19 @@ async def _import_recipe(
         if not (slot.item or slot.tag or slot.chemical):
             continue
 
-        if slot.item and not slot.fluid:
-            item_tags = tag_index.tags_for_item(slot.item)
-            # Items belong to the mod that owns their namespace, not the recipe's mod
-            owner_mv = item_mod_versions.get(slot.item.split(":")[0], mod_version)
-            app = await _get_or_create_item_appearance(
-                session, game, slot.item, owner_mv, item_tags
-            )
+        gid = graph_id(slot)
+        if gid:
+            # items, fluids and chemicals are all stored as appearances so the route graph, tags and
+            # search treat them alike; fluids/chemicals carry a 'fluid:' / 'chemical:' id prefix
+            if slot.fluid and not slot.chemical:
+                item_tags = fluid_tags.tags_for_item(gid[len("fluid:"):])
+            elif slot.chemical:
+                item_tags = set()
+            else:
+                item_tags = tag_index.tags_for_item(slot.item)
+            # Things belong to the mod that owns their namespace, not the recipe's mod
+            owner_mv = item_mod_versions.get(_bare(gid).split(":")[0], mod_version)
+            app = await _get_or_create_item_appearance(session, game, gid, owner_mv, item_tags)
             appearance_id = app.id
 
         rs = RecipeSlot(
@@ -394,7 +413,8 @@ async def run_import(
 
     print("Loading tags ...")
     tag_index = load_tags(export_dir)
-    print(f"  Loaded {len(tag_index._tag_to_items)} tags")
+    fluid_tags = load_fluid_tags(export_dir)
+    print(f"  Loaded {len(tag_index._tag_to_items)} item tags, {len(fluid_tags._tag_to_items)} fluid tags")
 
     # Load mod metadata from mods.json if present
     mods_meta: dict[str, dict] = {}
@@ -426,9 +446,10 @@ async def run_import(
                 namespace_to_recipes.setdefault(r.namespace, []).append(r)
             # Also create mods for namespaces that only appear as item owners (e.g. "minecraft")
             for r in cli_recipes:
-                for sl in (*r.inputs, *r.outputs):
-                    if sl.item and not sl.fluid:
-                        namespace_to_recipes.setdefault(sl.item.split(":")[0], [])
+                for sl in (*r.inputs, *r.outputs, *r.aux_inputs):
+                    gid = graph_id(sl)
+                    if gid:
+                        namespace_to_recipes.setdefault(_bare(gid).split(":")[0], [])
 
             print(f"  Found {len(namespace_to_recipes)} namespaces")
 
@@ -469,7 +490,7 @@ async def run_import(
 
                     is_modpack_recipe = cli_recipe.id in modpack_recipe_keys
                     await _import_recipe(
-                        session, cli_recipe, game, mv, modpack, tag_index, is_modpack_recipe,
+                        session, cli_recipe, game, mv, modpack, tag_index, fluid_tags, is_modpack_recipe,
                         mod_versions,
                     )
                     imported += 1

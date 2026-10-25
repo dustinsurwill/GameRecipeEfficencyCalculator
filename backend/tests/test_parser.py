@@ -38,6 +38,7 @@ def test_base_predicate_and_nested_result_with_probability(tmp_path):
     r = parse(tmp_path, {"type": "immersiveengineering:arc_furnace", "input": {"item": "a:gem"},
                          "additives": [{"item": "a:gem"}], "results": [{"basePredicate": {"item": "m:ingot"}, "count": 4}]})
     assert sig(r.outputs) == [("m:ingot", 4, False)]
+    assert sig(r.inputs) == [("a:gem", 2, False)] or sig(r.inputs) == [("a:gem", 1, False), ("a:gem", 1, False)]
     r = parse(tmp_path, {"type": "railcraft:crusher", "ingredient": {"tag": "c:ores/iron"}, "outputs": [
         {"count": 2, "probability": 1.0, "result": {"tag": "c:dusts/iron"}},
         {"probability": 0.1, "result": {"tag": "c:dusts/nickel"}}]})

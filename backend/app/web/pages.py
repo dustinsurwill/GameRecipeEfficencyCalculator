@@ -104,18 +104,20 @@ async def search_fragment(request: Request, q: str = "", scope: Scope = Sc, idx:
 @router.get("/{game}/{pack}/{version}/items")
 async def items_page(
     request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx,
-    q: str = "", mod: str = "", tag: str = "", sort: str = "name", craftable: str = "", page: int = Query(1, ge=1),
+    q: str = "", mod: str = "", tag: str = "", sort: str = "name", craftable: str = "", kind: str = "", page: int = Query(1, ge=1),
 ):
+    if kind not in ("item", "fluid", "chemical"):
+        kind = ""
     if sort not in ("name", "made_by", "used_in"):
         sort = "name"
     rows = idx.filter_items(q=q or None, mod=mod or None, tag=tag or None,
-                            craftable=True if craftable else None, sort=sort)
+                            craftable=True if craftable else None, sort=sort, kind=kind or None)
     pages = max(1, -(-len(rows) // ITEMS_PER_PAGE))
     page = min(page, pages)
     shown = rows[(page - 1) * ITEMS_PER_PAGE : page * ITEMS_PER_PAGE]
     return render(
         request, "items.html", scope=scope, items=shown, total=len(rows), page=page, pages=pages,
-        f={"q": q, "mod": mod, "tag": tag, "sort": sort, "craftable": craftable},
+        f={"q": q, "mod": mod, "tag": tag, "sort": sort, "craftable": craftable, "kind": kind},
     )
 
 

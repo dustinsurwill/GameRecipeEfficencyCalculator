@@ -65,11 +65,12 @@ async def list_items(
     mod: str | None = Query(default=None, description="mod namespace"),
     tag: str | None = None,
     craftable: bool | None = Query(default=None, description="only items with a recipe that makes them"),
+    kind: Literal["item", "fluid", "chemical"] | None = Query(default=None, description="items, fluids or chemicals only"),
     sort: Literal["name", "made_by", "used_in"] = "name",
     limit: int = Query(default=48, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    return service.page(idx.filter_items(q=q, mod=mod, tag=tag, craftable=craftable, sort=sort), limit, offset)
+    return service.page(idx.filter_items(q=q, mod=mod, tag=tag, craftable=craftable, sort=sort, kind=kind), limit, offset)
 
 
 @router.get("/item")

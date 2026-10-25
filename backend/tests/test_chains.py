@@ -2,16 +2,19 @@
 import uuid
 
 from app.api.v1.routes.chains import (
-    _backward_dfs, _deepen, _Excluder, _forward_dfs, _MachineInfo, _rank_backward, _rank_forward,
-    _Recipe, _RecipeGraph, _Slot,
+    _backward_dfs, _deepen, _Excluder, _forward_dfs, _link_inputs, _MachineInfo, _rank_backward,
+    _rank_forward, _Recipe, _RecipeGraph, _Slot,
 )
 
 
-def rec(rtype, machine, ins, outs, key=None):
+def rec(rtype, machine, ins, outs, key=None, aux=()):
+    """ids starting with 'fluid:' are fluid slots; `aux` entries are (id, qty) non-fluid catalysts."""
     r = _Recipe(id=uuid.uuid4(), recipe_type=rtype, machine=_MachineInfo(machine, machine),
                 import_key=key or str(uuid.uuid4()), time_ticks=None, energy_rf=None)
-    r.inputs = [_Slot(i, None, q, False) for i, q in ins]
-    r.outputs = [_Slot(o, None, q, False) for o, q in outs]
+    r.inputs = [_Slot(i, None, q, i.startswith("fluid:")) for i, q in ins]
+    r.outputs = [_Slot(o, None, q, o.startswith("fluid:")) for o, q in outs]
+    r.aux_inputs = [_Slot(i, None, q, False) for i, q in aux]
+    _link_inputs(r)
     return r
 
 
@@ -111,8 +114,49 @@ def test_routes_needing_other_items_rank_below_self_contained_ones_in_yield_mode
     assert [c[0][0][0].machine.id for c in ranked] == ["mp", "ms"]
 
 
-def test_item_made_only_from_fluids_is_still_a_starting_point():
-    cast = rec("t:cast", "caster", [], [("goal:g", 1)])          # fluid + cast only: no item inputs
+def test_a_recipe_with_nothing_to_follow_makes_its_output_a_starting_point():
+    spawn = rec("t:spawn", "spawner", [], [("goal:g", 1)])
     use = rec("t:use", "m", [("goal:g", 1)], [("final:f", 1)])
-    ranked = back(graph(cast, use), "final:f", _Excluder())
+    ranked = back(graph(spawn, use), "final:f", _Excluder())
     assert [(len(c[0]), c[3]) for c in ranked] == [(1, "goal:g")]
+
+
+def melt_cast():
+    melt = rec("t:melt", "melter", [("raw:ore", 1)], [("fluid:m:molten", 90)])
+    cast = rec("t:cast", "caster", [("fluid:m:molten", 90)], [("goal:ingot", 1)], aux=[("m:ingot_cast", 1)])
+    return melt, cast
+
+
+def test_routes_follow_fluids_forward_and_backward():
+    g = graph(*melt_cast())
+    ranked = back(g, "goal:ingot", _Excluder())
+    assert [(r.machine.id for r, _ in c[0]) and [r.machine.id for r, _ in c[0]] for c in ranked] == [["melter", "caster"]]
+    assert ranked[0][3] == "raw:ore" and ranked[0][4] == 1                  # 1 ore -> 90 mB -> 1 ingot
+    chains, _, _ = _deepen(lambda d, b: _forward_dfs(["raw:ore"], {"goal:ingot"}, g, _Excluder(), d, False, b), 4)
+    (chain, *_), = _rank_forward(chains, {"goal:ingot"})
+    assert [r.machine.id for r, _ in chain] == ["melter", "caster"]
+
+
+def test_catalysts_and_water_are_not_followed():
+    melt, cast = melt_cast()
+    assert [g.item_id for g in cast.gin] == ["fluid:m:molten"]               # the non-consumed cast is not an input
+    wash = rec("t:wash", "washer", [("raw:ore", 1), ("fluid:minecraft:water", 1000)], [("goal:clean", 1)])
+    assert [g.item_id for g in wash.gin] == ["raw:ore"]
+    ranked = back(graph(wash), "goal:clean", _Excluder())
+    assert [c[3] for c in ranked] == ["raw:ore"]                             # not 'water'
+
+
+def test_excluding_a_mod_also_blocks_its_fluids():
+    melt, cast = melt_cast()
+    assert _Excluder(mods=["m"]).blocks(melt) and _Excluder(mods=["m"]).blocks(cast)
+    assert _Excluder(items=["fluid:m:molten"]).blocks(cast)
+
+
+def test_fluid_side_inputs_flag_a_route_but_chemicals_do_not():
+    from app.api.v1.routes.chains import _has_side_inputs
+    cast = rec("t:c", "caster", [("raw:redstone", 1), ("fluid:m:molten", 960)], [("goal:g", 1)])
+    assert _has_side_inputs([(cast, 1.0)])
+    wash = rec("t:w", "washer", [("raw:ore", 1), ("chemical:mekanism:hcl", 1)], [("goal:g", 1)])
+    assert not _has_side_inputs([(wash, 1.0)])
+    melt, cast_only = melt_cast()
+    assert not _has_side_inputs([(melt, 1.0), (cast_only, 1.0)])

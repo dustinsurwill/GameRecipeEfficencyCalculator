@@ -68,6 +68,29 @@ class _Recipe:
     inputs: list[_Slot] = field(default_factory=list)
     outputs: list[_Slot] = field(default_factory=list)
     aux_inputs: list[_Slot] = field(default_factory=list)
+    # What the route graph follows as inputs: item inputs plus fluid/chemical inputs (stored either as
+    # inputs or aux). Catalysts (a non-consumed cast) and free fluids (water) are not followed.
+    gin: list[_Slot] = field(default_factory=list)
+
+
+# Free in every pack; following them would make nearly every machine route end in "water".
+_FREE_FLUIDS = frozenset({"fluid:minecraft:water"})
+
+
+def _bare_ns(item_id: str) -> str:
+    """Namespace of an item id; fluids/chemicals are 'fluid:ns:name' / 'chemical:ns:name'."""
+    for prefix in ("fluid:", "chemical:"):
+        if item_id.startswith(prefix):
+            item_id = item_id[len(prefix):]
+            break
+    return item_id.split(":", 1)[0]
+
+
+def _link_inputs(r: _Recipe) -> None:
+    def followed(s: _Slot) -> bool:
+        return bool(s.item_id or s.tag_string) and s.item_id not in _FREE_FLUIDS
+
+    r.gin = [s for s in r.inputs if followed(s)] + [s for s in r.aux_inputs if s.is_fluid and followed(s)]
 
 
 # ── Exclusions ────────────────────────────────────────────────────────────────
@@ -94,7 +117,7 @@ class _Excluder:
     def item_blocked(self, item_id: str) -> bool:
         if item_id in self.keep:
             return False
-        return item_id in self.items or item_id.split(":", 1)[0] in self.mods
+        return item_id in self.items or _bare_ns(item_id) in self.mods
 
     def _slots_blocked(self, r: _Recipe) -> bool:
         for group in (r.inputs, r.outputs, r.aux_inputs):
@@ -246,6 +269,7 @@ async def _load_recipe_graph(
                 r.outputs.append(slot)
             else:
                 r.aux_inputs.append(slot)
+        _link_inputs(r)
         recipes.append(r)
 
     return recipes, dict(tag_to_items), item_to_canonical
@@ -265,13 +289,14 @@ class _RecipeGraph:
                 if slot.item_id:
                     self._by_output[slot.item_id].append(r)
 
-            # Index only by the primary (first non-fluid) input (forward traversal)
+            # Forward traversal: index by the primary (first non-fluid) input, and by every fluid or
+            # chemical input, so melt -> cast style routes can be followed from a fluid.
             primary = next((s for s in r.inputs if not s.is_fluid), None)
-            if primary:
-                if primary.item_id:
-                    self._by_input[primary.item_id].append(r)
-                elif primary.tag_string:
-                    for item_id in tag_to_items.get(primary.tag_string, set()):
+            for slot in ([primary] if primary else []) + [g for g in r.gin if g.is_fluid]:
+                if slot.item_id:
+                    self._by_input[slot.item_id].append(r)
+                elif slot.tag_string:
+                    for item_id in tag_to_items.get(slot.tag_string, set()):
                         self._by_input[item_id].append(r)
 
     def recipes_consuming(self, item_id: str) -> list[_Recipe]:
@@ -382,9 +407,7 @@ def _consumed(recipe: _Recipe, item_id: str, tag_to_items: dict[str, set[str]]) 
     takes the item in two slots (or a slot and a tag it belongs to) must be charged for both, or the
     yield of the route is overstated."""
     total = 0.0
-    for s in recipe.inputs:
-        if s.is_fluid:
-            continue
+    for s in recipe.gin:
         if s.item_id == item_id or (s.tag_string and item_id in tag_to_items.get(s.tag_string, ())):
             total += s.quantity or 1.0
     return total
@@ -445,7 +468,7 @@ def _forward_dfs(
             runs = quantity / consumed
 
             for out_slot in recipe.outputs:
-                if not out_slot.item_id or out_slot.is_fluid:
+                if not out_slot.item_id:
                     continue
                 dfs(
                     out_slot.item_id,
@@ -516,10 +539,7 @@ def _backward_dfs(
 
             runs = quantity / (out_slot.quantity or 1.0)
 
-            for in_slot in recipe.inputs:
-                if in_slot.is_fluid:
-                    continue
-
+            for in_slot in recipe.gin:
                 if in_slot.item_id:
                     input_items = [in_slot.item_id]
                 elif in_slot.tag_string:
@@ -577,11 +597,14 @@ def _deepen(run, max_depth: int, enough: int = ENOUGH_CHAINS, seconds: float = 1
 
 
 def _has_side_inputs(steps: list[tuple[_Recipe, float]]) -> bool:
-    """True if any step also consumes some other item or tag. The search follows one item along the
-    route, so those extra materials are free in the yield figure; such routes are flagged and ranked
-    below self-contained processing chains."""
+    """True if any step consumes more than one kind of thing (items and fluids; Mekanism chemicals are
+    in-network utilities and don't count). The search follows one item along the route, so those extra
+    materials are free in the yield figure; such routes are flagged and ranked below self-contained
+    processing chains."""
     for r, _ in steps:
-        if len({s.item_id or "#" + (s.tag_string or "") for s in r.inputs if not s.is_fluid}) > 1:
+        kinds = {s.item_id or "#" + (s.tag_string or "") for s in r.gin
+                 if not (s.item_id or "").startswith("chemical:")}
+        if len(kinds) > 1:
             return True
     return False
 
@@ -664,10 +687,9 @@ def _serialize_forward_chain(
             "tag": s.tag_string,
             "item_id": s.item_id,
             "quantity": s.quantity * runs0 * quantity_scale,
-            "is_fluid": False,
+            "is_fluid": s.is_fluid,
         }
-        for s in recipe0.inputs
-        if not s.is_fluid
+        for s in recipe0.gin
     ]
 
     # final_outputs: target-matching outputs of last step
@@ -775,15 +797,16 @@ def _build_chain_dict(
             if label:
                 chemicals.append(label)
 
+        followed = {id(g) for g in recipe.gin}
         step_inputs = [
             {
                 "tag": s.tag_string,
                 "item_id": s.item_id,
+                "canonical_name": item_to_canonical.get(s.item_id or ""),
                 "quantity": s.quantity * runs * quantity_scale,
                 "is_fluid": s.is_fluid,
             }
-            for s in recipe.inputs
-            if not s.is_fluid
+            for s in recipe.gin
         ]
         step_outputs = [
             {
@@ -791,19 +814,21 @@ def _build_chain_dict(
                 "item_id": s.item_id,
                 "canonical_name": item_to_canonical.get(s.item_id or ""),
                 "quantity": s.quantity * runs * quantity_scale,
-                "is_fluid": False,
+                "is_fluid": s.is_fluid,
             }
             for s in recipe.outputs
             if s.item_id
         ]
+        # catalysts, free fluids (water) and anything else the route doesn't follow
         step_aux = [
             {
                 "item_id": s.item_id,
                 "canonical_name": item_to_canonical.get(s.item_id or "") if s.item_id else None,
                 "quantity": s.quantity * runs * quantity_scale,
-                "is_fluid": True,
+                "is_fluid": s.is_fluid,
             }
             for s in recipe.aux_inputs
+            if id(s) not in followed
         ]
 
         serialized_steps.append({

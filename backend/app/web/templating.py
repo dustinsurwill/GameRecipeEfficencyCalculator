@@ -63,8 +63,17 @@ def qs(**params) -> str:
     return "?" + "&".join(parts) if parts else ""
 
 
+def ns_of(ident: str) -> str:
+    """Namespace of an item/fluid/chemical id ('fluid:oritech:x' -> 'oritech')."""
+    for prefix in ("fluid:", "chemical:"):
+        if ident.startswith(prefix):
+            ident = ident[len(prefix):]
+            break
+    return ident.split(":")[0]
+
+
 templates.env.filters.update(
-    num=fmt_num, qty=fmt_qty, tag_label=tag_label, ticks=fmt_ticks, urlq=q,
+    ns_of=ns_of, num=fmt_num, qty=fmt_qty, tag_label=tag_label, ticks=fmt_ticks, urlq=q,
 )
 templates.env.globals.update(hue=hue, initials=initials, qs=qs, urlq=q)
 

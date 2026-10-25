@@ -2,11 +2,11 @@
 {% import "macros.html" as m %}
 {% block title %}Route finder — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
 {% macro slotline(s) -%}
-  {%- set label = s.canonical_name or (s.item_id.split(':')[1].replace('_', ' ')|title if s.item_id else (('Any ' ~ (s.tag|tag_label)) if s.tag else 'Fluid / chemical')) -%}
+  {%- set label = s.canonical_name or ((s.item_id|replace('fluid:', '')|replace('chemical:', '')).split(':')[1].replace('_', ' ')|title if s.item_id else (('Any ' ~ (s.tag|tag_label)) if s.tag else 'Fluid / chemical')) -%}
   <div class="slotline">
-    {{ m.tile(label, (s.item_id or s.tag or '').split(':')[0], 24, tag=(not s.item_id and s.tag)) }}
-    <span class="qty">{{ s.quantity|qty }}×</span>
-    {% if s.item_id and not s.is_fluid %}<a class="u" href="{{ scope.url('/items/' ~ (s.item_id|urlq)) }}">{{ label }}</a>{% else %}<span>{{ label }}</span>{% endif %}
+    {{ m.tile(label, (s.item_id or s.tag or '')|ns_of, 24, tag=(not s.item_id and s.tag), fluid=s.is_fluid) }}
+    <span class="qty">{{ s.quantity|qty }}{{ ' mB' if s.is_fluid }}{{ '' if s.is_fluid else '×' }}</span>
+    {% if s.item_id %}<a class="u" href="{{ scope.url('/items/' ~ (s.item_id|urlq)) }}">{{ label }}</a>{% else %}<span>{{ label }}</span>{% endif %}
   </div>
 {%- endmacro %}
 {% block content %}

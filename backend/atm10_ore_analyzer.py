@@ -119,6 +119,26 @@ MACHINE_NAMES: dict[str, str] = {
     "mekanism:metallurgic_infusing":    "Metallurgic Infuser",
 }
 
+def norm_fluid_id(fluid_id: str) -> str:
+    """'oritech:still_molten_fluxite' / 'alltheores:flowing_molten_iron' -> the source fluid's id."""
+    ns, _, path = fluid_id.rstrip("?").partition(":")
+    for prefix in ("flowing_", "still_"):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+    return f"{ns}:{path}"
+
+
+def graph_id(slot: "Slot") -> Optional[str]:
+    """Stable id of the thing a slot holds, for the route graph.
+    Items keep their id; fluids and chemicals get a 'fluid:' / 'chemical:' prefix so they can never
+    collide with an item of the same name. Tag-only slots and unnamed fluids have none."""
+    if slot.chemical:
+        return f"chemical:{slot.chemical}"
+    if slot.fluid and slot.item:
+        return None if slot.item == "minecraft:empty" else f"fluid:{norm_fluid_id(slot.item)}"
+    return slot.item
+
+
 def machine_name(recipe_type: str) -> str:
     return MACHINE_NAMES.get(recipe_type, recipe_type.split(":")[-1].replace("_", " ").title())
 
@@ -154,10 +174,10 @@ _INPUT_KEYS = (
     "ingredient", "ingredients", "input", "inputs", "item_input", "item_inputs", "main_input",
     "input_items", "materials", "material", "sources", "base", "addition", "template", "reagent",
     "pedestalItems", "catalyst", "soil", "target_item", "gear", "block", "item1", "item2", "item3",
-    "input0", "input1", "ingredient1", "ingredient2", "left_input", "right_input", "input_item", "mercury", "salt", "sulfur", "leafA", "leafB", "source_item",
+    "additives", "input0", "input1", "ingredient1", "ingredient2", "left_input", "right_input", "input_item", "mercury", "salt", "sulfur", "leafA", "leafB", "source_item",
 )
 # fluids / chemicals are tracked as aux inputs (they are not items in the route graph)
-_AUX_KEYS = ("fluid", "fluids", "fluid_input", "fluidInput", "chemical_input", "input_fluid", "extra_input", "additives")
+_AUX_KEYS = ("fluid", "fluids", "fluid_input", "fluidInput", "chemical_input", "input_fluid", "extra_input")
 _OUTPUT_KEYS = (
     "result", "results", "output", "outputs", "output_item", "outputItems", "main_output",
     "fluid_output", "chemical_output", "fluidOutputs", "fluid_outputs", "output_fluid",
@@ -276,7 +296,7 @@ def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: lis
         if v is None or isinstance(v, (bool, int, float)):
             continue
         for sl in _aggregate(_entry_to_slot(x, False) for x in _entries(v)):
-            sl.fluid = True if k != "additives" else sl.fluid
+            sl.fluid = True
             aux.append(sl)
     # casting: the cast is a catalyst unless the recipe consumes it
     cast = _slot_from_ingredient(data.get("cast")) if isinstance(data.get("cast"), dict) else None
@@ -528,10 +548,10 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         inp = _slot_from_ingredient(data.get("input"))
         if inp:
             inputs.append(inp)
-        for add in data.get("additives", []):
+        for add in data.get("additives", []):      # additives are consumed alongside the input
             s = _slot_from_ingredient(add)
             if s:
-                aux_inputs.append(s)
+                inputs.append(s)
         out = data.get("result", {})
         if isinstance(out, dict):
             item_id = out.get("id") or out.get("item")
@@ -665,7 +685,8 @@ class TagIndex:
       item → set of tags it belongs to
     """
 
-    def __init__(self, tag_root: Path):
+    def __init__(self, tag_root: Path, kind: str = "item"):
+        self.kind = kind            # which tags/minecraft/<kind>/ folder: "item" or "fluid"
         self._tag_to_items: dict[str, set[str]] = defaultdict(set)
         self._item_to_tags: dict[str, set[str]] = defaultdict(set)
         self._raw: dict[str, list] = {}  # tag → raw entries (may include sub-tags)
@@ -676,7 +697,7 @@ class TagIndex:
         # Structure: tags/minecraft/item/<tag_namespace>/<tag_path>.json
         # e.g. tags/minecraft/item/c/ores/gold.json → tag id "c:ores/gold"
         #      tags/minecraft/item/minecraft/gold_ores.json → tag id "minecraft:gold_ores"
-        item_dir = tag_root / "item"
+        item_dir = tag_root / self.kind
         if not item_dir.exists():
             return
         for namespace_dir in item_dir.iterdir():
@@ -703,6 +724,8 @@ class TagIndex:
             for entry in entries:
                 if isinstance(entry, str):
                     clean = entry.rstrip("?")  # ? means optional
+                    if self.kind == "fluid" and not clean.startswith("#"):
+                        clean = norm_fluid_id(clean)     # still/flowing variants are one fluid
                     if clean.startswith("#"):
                         sub_tag = clean[1:]
                         sub_items = self._tag_to_items.get(sub_tag, set())
@@ -974,6 +997,10 @@ def load_all_recipes(export_root: Path) -> list[Recipe]:
 
 def load_tags(export_root: Path) -> TagIndex:
     return TagIndex(export_root / "tags" / "minecraft")
+
+
+def load_fluid_tags(export_root: Path) -> TagIndex:
+    return TagIndex(export_root / "tags" / "minecraft", kind="fluid")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
