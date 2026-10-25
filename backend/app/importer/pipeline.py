@@ -127,7 +127,8 @@ async def _get_or_create_modpack(
 
 
 async def _get_or_create_mod(
-    session: AsyncSession, game: Game, mod_id: str, name: str, namespace: str
+    session: AsyncSession, game: Game, mod_id: str, name: str, namespace: str,
+    description: str | None = None,
 ) -> Mod:
     result = await session.exec(
         select(Mod).where(Mod.game_id == game.id, Mod.namespace == namespace)
@@ -139,6 +140,7 @@ async def _get_or_create_mod(
             name=name,
             slug=mod_id,
             namespace=namespace,
+            description=description,
         )
         session.add(mod)
         await session.flush()
@@ -205,10 +207,7 @@ def _derive_canonical_name(item_id: str, item_tags: set[str]) -> str:
             return f"Raw {ore}"
     # Fallback: derive from item_id ("mekanism:dust_gold" → "Dust Gold (Mekanism)")
     ns, _, path = item_id.partition(":")
-    name = path.replace("_", " ").title()
-    if ns not in ("minecraft",):
-        name = f"{name} ({ns.title()})"
-    return name
+    return path.replace("/", " ").replace("_", " ").title()
 
 
 async def _get_or_create_item_identity(
@@ -307,6 +306,7 @@ async def _import_recipe(
     modpack: ModPackVersion,
     tag_index: TagIndex,
     is_modpack_recipe: bool,
+    item_mod_versions: dict[str, ModVersion],
 ) -> None:
     import_key = cli_recipe.id
 
@@ -342,11 +342,15 @@ async def _import_recipe(
     )
     for order, (slot, slot_type) in enumerate(all_slots):
         appearance_id = None
+        if not (slot.item or slot.tag or slot.chemical):
+            continue
 
         if slot.item and not slot.fluid:
             item_tags = tag_index.tags_for_item(slot.item)
+            # Items belong to the mod that owns their namespace, not the recipe's mod
+            owner_mv = item_mod_versions.get(slot.item.split(":")[0], mod_version)
             app = await _get_or_create_item_appearance(
-                session, game, slot.item, mod_version, item_tags
+                session, game, slot.item, owner_mv, item_tags
             )
             appearance_id = app.id
 
@@ -413,16 +417,23 @@ async def run_import(
             namespace_to_recipes: dict[str, list[CliRecipe]] = {}
             for r in cli_recipes:
                 namespace_to_recipes.setdefault(r.namespace, []).append(r)
+            # Also create mods for namespaces that only appear as item owners (e.g. "minecraft")
+            for r in cli_recipes:
+                for sl in (*r.inputs, *r.outputs):
+                    if sl.item and not sl.fluid:
+                        namespace_to_recipes.setdefault(sl.item.split(":")[0], [])
 
             print(f"  Found {len(namespace_to_recipes)} namespaces")
 
             mod_versions: dict[str, ModVersion] = {}
             for ns, _ in namespace_to_recipes.items():
                 meta = mods_meta.get(ns, {})
-                mod_name = meta.get("name", ns.replace("_", " ").title())
+                mod_name = meta.get("name") or ("Minecraft" if ns == "minecraft" else ns.replace("_", " ").title())
                 mod_version_str = meta.get("version", "unknown")
 
-                mod = await _get_or_create_mod(session, game, ns, mod_name, ns)
+                mod = await _get_or_create_mod(
+                    session, game, ns, mod_name, ns, meta.get("description")
+                )
                 mv = await _get_or_create_mod_version(
                     session, mod, game_version, mod_version_str
                 )
@@ -451,7 +462,8 @@ async def run_import(
 
                     is_modpack_recipe = cli_recipe.id in modpack_recipe_keys
                     await _import_recipe(
-                        session, cli_recipe, game, mv, modpack, tag_index, is_modpack_recipe
+                        session, cli_recipe, game, mv, modpack, tag_index, is_modpack_recipe,
+                        mod_versions,
                     )
                     imported += 1
 

@@ -5,6 +5,8 @@
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Avatar from '$lib/components/ui/avatar';
 	import { Button } from '$lib/components/ui/button';
+	import { page } from '$app/state';
+	import SearchBox from './SearchBox.svelte';
 
 	let dark = $state(false);
 
@@ -24,12 +26,23 @@
 	}
 </script>
 
-<nav class="border-border bg-background border-b px-4 py-3">
-	<div class="mx-auto flex max-w-7xl items-center justify-between">
-		<div class="flex items-center gap-6">
-			<a href="/" class="text-foreground text-lg font-semibold">RecipeBook</a>
-			<a href="/games" class="text-muted-foreground hover:text-foreground text-sm transition-colors">Browse</a>
+<nav class="border-border bg-background/90 sticky top-0 z-40 border-b px-4 py-2.5 backdrop-blur">
+	<div class="mx-auto flex max-w-7xl items-center justify-between gap-4">
+		<div class="flex items-center gap-5">
+			<a href="/" class="text-foreground flex items-center gap-2 text-lg font-bold tracking-tight">
+				<span class="bg-primary text-primary-foreground grid h-6 w-6 place-items-center rounded text-xs font-black">R</span>
+				<span class="hidden sm:inline">RecipeBook</span>
+			</a>
+			<div class="flex items-center gap-3 text-sm sm:gap-4">
+				{#each [['/items', 'Items'], ['/mods', 'Mods'], ['/machines', 'Machines'], ['/routes', 'Routes']] as [href, label]}
+					<a {href} class="transition-colors {page.url.pathname.startsWith(href) ? 'text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}">{label}</a>
+				{/each}
+			</div>
 		</div>
+
+		{#if page.url.pathname !== '/'}
+			<div class="hidden max-w-md flex-1 md:block"><SearchBox /></div>
+		{/if}
 
 		<div class="flex items-center gap-3">
 			<button

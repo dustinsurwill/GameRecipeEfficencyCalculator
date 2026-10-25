@@ -66,6 +66,13 @@ MACHINE_NAMES: dict[str, str] = {
     "minecraft:stonecutting":           "Stonecutter",
     "minecraft:crafting_shaped":        "Crafting Table",
     "minecraft:crafting_shapeless":     "Crafting Table",
+    "crafting_shaped":                  "Crafting Table",
+    "crafting_shapeless":               "Crafting Table",
+    "kubejs:shaped":                    "Crafting Table",
+    "kubejs:shapeless":                 "Crafting Table",
+    "minecraft:smithing_transform":     "Smithing Table",
+    "minecraft:smithing_trim":          "Smithing Table",
+    "create:cutting":                   "Create Saw",
     "mekanism:enriching":               "Enrichment Chamber",
     "mekanism:crushing":                "Crusher",
     "mekanism:purifying":               "Purification Chamber",
@@ -140,6 +147,95 @@ def _parse_conditions_met(data: dict) -> bool:
     return True
 
 
+
+_SHAPED_TYPES = ("minecraft:crafting_shaped", "crafting_shaped", "kubejs:shaped")
+_SHAPELESS_TYPES = ("minecraft:crafting_shapeless", "crafting_shapeless", "kubejs:shapeless")
+_INPUT_KEYS = (
+    "ingredient", "ingredients", "input", "inputs", "item_input", "item_inputs",
+    "sources", "base", "addition", "template", "material", "catalyst", "soil", "target_item",
+)
+_OUTPUT_KEYS = ("result", "results", "output", "outputs", "output_item", "outputItems")
+
+
+def _aggregate(slots) -> list[Slot]:
+    """Merge identical slots, summing counts (shapeless recipes list the same item repeatedly)."""
+    merged: dict[tuple, Slot] = {}
+    for sl in slots:
+        if sl is None:
+            continue
+        k = (sl.tag, sl.item, sl.fluid)
+        if k in merged:
+            merged[k].count += sl.count
+        else:
+            merged[k] = Slot(tag=sl.tag, item=sl.item, count=sl.count, fluid=sl.fluid)
+    return list(merged.values())
+
+
+def _num(v: Any, default: float = 1.0) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
+def _entry_to_slot(e: Any, is_output: bool) -> Optional[Slot]:
+    """One heterogeneous recipe entry (item / tag / fluid / wrapper) -> Slot."""
+    if isinstance(e, str):
+        if not e or e.startswith("{"):
+            return None
+        return Slot(tag=e[1:], item=None, count=1.0) if e.startswith("#") else Slot(tag=None, item=e, count=1.0)
+    if not isinstance(e, dict):
+        return None
+    # wrappers such as {"ingredient": {...}, "count": 2} or {"item": {...}, "chance": .5}
+    for wrap in ("ingredient", "item", "stack"):
+        if isinstance(e.get(wrap), (dict, list)):
+            inner = _entry_to_slot(e[wrap] if isinstance(e[wrap], dict) else (e[wrap] or [None])[0], is_output)
+            if inner:
+                inner.count = _num(e.get("count", e.get("amount")), inner.count)
+            return inner
+    if isinstance(e.get("items"), str) and "components" in e:   # NeoForge component ingredient
+        return Slot(tag=None, item=e["items"], count=_num(e.get("count"), 1))
+    fluid = e.get("fluid")
+    if isinstance(fluid, str):
+        return Slot(tag=None, item=fluid, count=_num(e.get("amount"), 1000), fluid=True)
+    if e.get("tag") and not e.get("id"):
+        return Slot(tag=e["tag"], item=None, count=_num(e.get("count"), 1))
+    item = e.get("item") or e.get("id")
+    if isinstance(item, str):
+        is_fluid_like = "amount" in e and "count" not in e
+        return Slot(tag=None, item=item, count=_num(e.get("count", e.get("amount")), 1), fluid=is_fluid_like)
+    return None
+
+
+def _output_slots(res: Any) -> list[Slot]:
+    if res is None:
+        return []
+    entries = res if isinstance(res, list) else [res]
+    out = []
+    for e in entries:
+        sl = _entry_to_slot(e, True)
+        if sl and sl.item:
+            out.append(sl)
+    return out
+
+
+def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: list[Slot]) -> bool:
+    for k in _INPUT_KEYS:
+        v = data.get(k)
+        if v is None:
+            continue
+        entries = v if isinstance(v, list) else [v]
+        # lists of alternatives inside a list entry -> first
+        flat = [(x[0] if isinstance(x, list) and x else x) for x in entries]
+        for sl in _aggregate(_entry_to_slot(x, False) for x in flat):
+            (aux if sl.fluid else inputs).append(sl)
+    for k in _OUTPUT_KEYS:
+        v = data.get(k)
+        if v is None:
+            continue
+        outputs.extend(_output_slots(v))
+        if outputs:
+            break
+    return bool(inputs or aux) and bool(outputs)
+
+
 def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe]:
     """Parse one recipe JSON file into a normalised Recipe."""
     try:
@@ -153,7 +249,11 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         return None
 
     conditions_met = _parse_conditions_met(data)
-    namespace = path.parts[path.parts.index("recipes") + 1] if "recipes" in path.parts else "unknown"
+    namespace = "unknown"
+    for folder in ("recipes", "added_recipes"):
+        if folder in path.parts:
+            namespace = path.parts[path.parts.index(folder) + 1]
+            break
     machine = machine_name(rtype)
     recipe_id = str(path.relative_to(export_root.resolve()))
 
@@ -422,9 +522,42 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         res = data.get("output", {})
         outputs.append(Slot(tag=None, item=res.get("id"), count=float(res.get("count", 1))))
 
+    # ── Crafting grid ─────────────────────────────────────────────────────
+    elif rtype in _SHAPED_TYPES:
+        key = data.get("key", {})
+        counts: dict[tuple, float] = {}
+        for row in data.get("pattern", []):
+            for ch in row:
+                ing = key.get(ch)
+                if ing is None:
+                    continue
+                sl = _slot_from_ingredient(ing)
+                if sl:
+                    counts[(sl.tag, sl.item)] = counts.get((sl.tag, sl.item), 0) + 1
+        inputs.extend(Slot(tag=t, item=i, count=c) for (t, i), c in counts.items())
+        outputs.extend(_output_slots(data.get("result")))
+
+    elif rtype in _SHAPELESS_TYPES:
+        inputs.extend(_aggregate(_slot_from_ingredient(i) for i in data.get("ingredients", [])))
+        outputs.extend(_output_slots(data.get("result")))
+
+    elif rtype in ("minecraft:smithing_transform", "minecraft:smithing_trim"):
+        for k in ("template", "base", "addition"):
+            sl = _slot_from_ingredient(data.get(k))
+            if sl:
+                inputs.append(sl)
+        outputs.extend(_output_slots(data.get("result")))
+
     else:
-        # Unknown type — skip silently
-        return None
+        # Generic fallback: walk well-known input/output keys. Not perfect for exotic
+        # mods, but captures most "ingredient(s) -> result(s)" style recipes.
+        if not _generic_parse(data, inputs, outputs, aux_inputs):
+            return None
+        time_ticks = next(
+            (int(data[k]) for k in ("time", "processing_time", "cookingtime", "process_time", "duration")
+             if isinstance(data.get(k), (int, float))),
+            None,
+        )
 
     if not inputs or not outputs:
         return None

@@ -120,25 +120,23 @@ async def _load_recipe_graph(
             tag_to_items[tag].add(app.item_id)
 
     # Resolve canonical names
-    identity_ids = {a.identity_id for a in appearances}
+    # Subquery (not a literal id list): packs have >32k items, over asyncpg's parameter limit
+    identity_subq = select(ItemAppearance.identity_id).where(
+        ItemAppearance.mod_version_id.in_(mod_version_ids)
+    )
     item_to_canonical: dict[str, str] = {}
-    if identity_ids:
+    if appearances:
         identity_result = await session.exec(
-            select(ItemIdentity).where(ItemIdentity.id.in_(identity_ids))
+            select(ItemIdentity).where(ItemIdentity.id.in_(identity_subq))
         )
         identity_map = {i.id: i.canonical_name for i in identity_result.scalars().all()}
         for app in appearances:
             if app.identity_id in identity_map:
                 item_to_canonical[app.item_id] = identity_map[app.identity_id]
 
-    link_result = await session.exec(
-        select(RecipeModVersionLink).where(
-            RecipeModVersionLink.mod_version_id.in_(mod_version_ids)
-        )
+    scoped_recipe_ids = select(RecipeModVersionLink.recipe_id).where(
+        RecipeModVersionLink.mod_version_id.in_(mod_version_ids)
     )
-    recipe_ids = {link.recipe_id for link in link_result.scalars().all()}
-    if not recipe_ids:
-        return [], dict(tag_to_items), item_to_canonical
 
     machine_result = await session.exec(select(MachineIdentity))
     machine_map: dict[uuid.UUID, _MachineInfo] = {
@@ -149,15 +147,22 @@ async def _load_recipe_graph(
     # Only approved recipes participate in traversal
     recipe_result = await session.exec(
         select(Recipe).where(
-            Recipe.id.in_(recipe_ids),
+            Recipe.id.in_(scoped_recipe_ids),
             Recipe.status == RecipeStatus.APPROVED,
         )
     )
     db_recipes = list(recipe_result.scalars().all())
-    approved_ids = {r.id for r in db_recipes}
+    if not db_recipes:
+        return [], dict(tag_to_items), item_to_canonical
 
     slot_result = await session.exec(
-        select(RecipeSlot).where(RecipeSlot.recipe_id.in_(approved_ids))
+        select(RecipeSlot).where(
+            RecipeSlot.recipe_id.in_(
+                select(Recipe.id).where(
+                    Recipe.id.in_(scoped_recipe_ids), Recipe.status == RecipeStatus.APPROVED
+                )
+            )
+        )
     )
     slots_by_recipe: dict[uuid.UUID, list[RecipeSlot]] = defaultdict(list)
     for slot in slot_result.scalars().all():
@@ -240,6 +245,21 @@ def _resolve(value: str, tag_to_items: dict[str, set[str]]) -> list[str]:
     return [value]
 
 
+class _Budget:
+    """Caps DFS node visits — packs with crafting recipes have effectively unbounded paths."""
+
+    def __init__(self, limit: int = 400_000) -> None:
+        self.left = limit
+        self.hit = False
+
+    def spend(self) -> bool:
+        if self.left <= 0:
+            self.hit = True
+            return False
+        self.left -= 1
+        return True
+
+
 # ── Forward DFS ───────────────────────────────────────────────────────────────
 # Each chain: list of (recipe, runs) in execution order.
 # `runs` = how many times that recipe runs, starting from 1.0 unit of start_item.
@@ -251,6 +271,7 @@ def _forward_dfs(
     exclude: list[str],
     max_depth: int,
     allow_cycles: bool,
+    budget: _Budget,
 ) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None]], int]:
     all_chains: list[tuple[list, bool, int | None]] = []
     cycles_excluded = 0
@@ -264,7 +285,7 @@ def _forward_dfs(
     ) -> None:
         nonlocal cycles_excluded
 
-        if depth > max_depth:
+        if depth > max_depth or not budget.spend():
             return
 
         if item_id in target_items:
@@ -320,6 +341,7 @@ def _backward_dfs(
     exclude: list[str],
     max_depth: int,
     allow_cycles: bool,
+    budget: _Budget,
 ) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None, str, float]], int]:
     all_chains: list[tuple[list, bool, int | None, str, float]] = []
     cycles_excluded = 0
@@ -333,7 +355,7 @@ def _backward_dfs(
     ) -> None:
         nonlocal cycles_excluded
 
-        if depth > max_depth:
+        if depth > max_depth or not budget.spend():
             return
 
         if item_id in path:
@@ -837,8 +859,9 @@ async def get_chains(
         if not start_items:
             return _empty_result(scope_info, target, start, "No items found for start")
 
+        budget = _Budget()
         raw_chains, cycles_excluded = await asyncio.to_thread(
-            _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles,
+            _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles, budget,
         )
         raw_chains = _dedup_forward(raw_chains)
         total_found = len(raw_chains)
@@ -874,8 +897,9 @@ async def get_chains(
     else:
         direction = "backward"
 
+        budget = _Budget()
         raw_chains_b, cycles_excluded = await asyncio.to_thread(
-            _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles,
+            _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles, budget,
         )
         raw_chains_b = _dedup_backward(raw_chains_b)
         total_found = len(raw_chains_b)
@@ -910,6 +934,7 @@ async def get_chains(
         "cycles_found": cycles_found,
         "cycles_excluded": cycles_excluded,
         "excluded_applied": exclude,
+        "truncated": budget.hit,
         "chains": serialized,
     }
 
