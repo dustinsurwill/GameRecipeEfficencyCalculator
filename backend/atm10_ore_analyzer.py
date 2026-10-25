@@ -182,7 +182,8 @@ _OUTPUT_KEYS = (
     "result", "results", "output", "outputs", "output_item", "outputItems", "main_output",
     "fluid_output", "chemical_output", "fluidOutputs", "fluid_outputs", "output_fluid",
 )
-_SLOT_KEYS = ("item", "id", "tag", "fluid", "ingredient", "basePredicate", "items", "stack")
+_SLOT_KEYS = ("item", "id", "tag", "fluid", "ingredient", "basePredicate", "items", "stack", "chemical", "children", "base")
+_CHEM_MODS = ("mekanism", "mekmm", "mekanismgenerators", "mekanismadditions")
 
 
 def _aggregate(slots) -> list[Slot]:
@@ -191,11 +192,11 @@ def _aggregate(slots) -> list[Slot]:
     for sl in slots:
         if sl is None:
             continue
-        k = (sl.tag, sl.item, sl.fluid)
+        k = (sl.tag, sl.item, sl.fluid, sl.chemical)
         if k in merged:
             merged[k].count += sl.count
         else:
-            merged[k] = Slot(tag=sl.tag, item=sl.item, count=sl.count, fluid=sl.fluid)
+            merged[k] = Slot(tag=sl.tag, item=sl.item, count=sl.count, fluid=sl.fluid, chemical=sl.chemical)
     return list(merged.values())
 
 
@@ -213,6 +214,16 @@ def _entry_to_slot(e: Any, is_output: bool) -> Optional[Slot]:
         return None
     # dynamic ingredients (type: some:crop_component, ...) have no static item; Mystical Agriculture
     # essence is the one we can name exactly
+    if isinstance(e.get("children"), list) and e["children"] and "chemical" not in e:   # neoforge:compound / intersection
+        inner = _entry_to_slot(e["children"][0], is_output)
+        if inner:
+            inner.count = _num(e.get("count"), inner.count)
+        return inner
+    if isinstance(e.get("base"), dict) and "type" in e:                                  # neoforge:difference
+        inner = _entry_to_slot(e["base"], is_output)
+        if inner:
+            inner.count = _num(e.get("count"), inner.count)
+        return inner
     if "type" in e and not any(k in e for k in _SLOT_KEYS):
         if isinstance(e.get("ingredients"), list) and e["ingredients"]:      # neoforge:compound etc.
             return _entry_to_slot(e["ingredients"][0], is_output)
@@ -282,7 +293,7 @@ def _entries(v: Any) -> list[Any]:
     return [(x[0] if isinstance(x, list) and x else x) for x in items]
 
 
-def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: list[Slot]) -> bool:
+def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: list[Slot], chem_mod: bool = False) -> bool:
     for k in _INPUT_KEYS:
         v = data.get(k)
         if v is None or isinstance(v, (bool, int, float)):
@@ -306,7 +317,13 @@ def _generic_parse(data: dict, inputs: list[Slot], outputs: list[Slot], aux: lis
         v = data.get(k)
         if v is None:
             continue
-        outputs.extend(_output_slots(_entries(v) if isinstance(v, dict) and not any(x in v for x in _SLOT_KEYS) else v))
+        got = _output_slots(_entries(v) if isinstance(v, dict) and not any(x in v for x in _SLOT_KEYS) else v)
+        # Mekanism writes chemical products as {"amount", "id"} - the same shape as a fluid
+        if chem_mod and (k == "chemical_output" or k in ("output", "main_output")):
+            for sl in got:
+                if sl.fluid and sl.item and not sl.chemical:
+                    sl.chemical, sl.item = sl.item, None
+        outputs.extend(got)
     if not outputs and isinstance(data.get("fluid"), (dict, list)):
         # e.g. IE fermenter: item in, `fluid` out. The fluid is the product when nothing else is.
         moved = [a for a in aux if a.fluid and (a.item or a.tag)]
@@ -365,7 +382,6 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
     # ── Mekanism single-item-in single-item-out ────────────────────────────
     if rtype in (
         "mekanism:enriching", "mekanism:crushing", "mekanism:compressing",
-        "mekanism:activating",
     ):
         s = _slot_from_ingredient(data.get("input"))
         if s:
@@ -535,7 +551,9 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
         if main:
             inputs.append(main)
         extra = data.get("extra_input") or data.get("chemical_input")
-        if extra:
+        if extra and (extra.get("item") or (extra.get("tag") and "chemical_input" not in data)):
+            inputs.append(_slot_from_ingredient(extra))
+        elif extra:
             aux_inputs.append(Slot(
                 tag=extra.get("tag"), item=None,
                 count=float(extra.get("amount", extra.get("count", 1))),
@@ -650,7 +668,7 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
     else:
         # Generic fallback: walk well-known input/output keys. Not perfect for exotic
         # mods, but captures most "ingredient(s) -> result(s)" style recipes.
-        if not _generic_parse(data, inputs, outputs, aux_inputs):
+        if not _generic_parse(data, inputs, outputs, aux_inputs, rtype.split(':')[0] in _CHEM_MODS):
             return None
         time_ticks = next(
             (int(data[k]) for k in ("time", "processing_time", "cookingtime", "process_time", "duration")

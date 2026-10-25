@@ -106,3 +106,23 @@ def test_canonical_item_for_a_tag_prefers_known_namespaces(tmp_path):
     ix = TagIndex(tmp_path)
     assert ix.canonical_item("c:dusts/iron") == "alltheores:iron_dust"
     assert ix.canonical_item("c:nope") is None
+
+
+def test_mekanism_chemical_outputs_and_inputs(tmp_path):
+    r = parse(tmp_path, {"type": "mekanism:dissolution", "chemical_input": {"amount": 1, "chemical": "mekanism:sulfuric_acid"},
+                         "item_input": {"count": 3, "tag": "c:raw_materials/iron"}, "output": {"amount": 2000, "id": "alltheores:dirty_iron"}}, "mekanism")
+    assert sig(r.outputs) == [("alltheores:dirty_iron", 2000, True)] and r.outputs[0].chemical == "alltheores:dirty_iron"
+    r = parse(tmp_path, {"type": "mekanism:chemical_infusing", "left_input": {"amount": 1, "chemical": "mekanism:a"},
+                         "right_input": {"amount": 4, "chemical": "mekanism:b"}, "output": {"amount": 5, "id": "mekanism:c"}}, "mekanism")
+    assert sorted(s.chemical for s in r.aux_inputs) == ["mekanism:a", "mekanism:b"] and r.outputs[0].chemical == "mekanism:c"
+
+
+def test_mekanism_activating_and_difference_ingredient(tmp_path):
+    r = parse(tmp_path, {"type": "mekanism:activating", "input": {"amount": 1, "chemical": "mekanism:lithium"},
+                         "output": {"amount": 1, "id": "mekanismgenerators:tritium"}}, "mekanism")
+    assert r.aux_inputs[0].chemical == "mekanism:lithium" and r.outputs[0].chemical == "mekanismgenerators:tritium"
+    r = parse(tmp_path, {"type": "mekanism:painting", "chemical_input": {"amount": 32, "chemical": "mekanism:purple"},
+                         "item_input": {"type": "neoforge:difference", "base": {"tag": "mekanism:colorable/carpets"}, "count": 1,
+                                        "subtracted": {"item": "minecraft:purple_carpet"}},
+                         "output": {"count": 1, "id": "minecraft:purple_carpet"}}, "mekanism")
+    assert sig(r.inputs) == [("mekanism:colorable/carpets", 1, False)]
