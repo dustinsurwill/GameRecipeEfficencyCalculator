@@ -394,26 +394,26 @@ def parse_recipe(path: Path, export_root: Path = EXPORT_ROOT) -> Optional[Recipe
                                    fluid=True, chemical=chem.get("chemical")))
         out = data.get("output", {})
         # dissolution outputs a chemical, not an item — track as output for chain resolution
-        outputs.append(Slot(tag=None, item=out.get("id"), count=float(out.get("amount", 1)),
-                            fluid=True))
+        outputs.append(Slot(tag=None, item=None, count=float(out.get("amount", 1)),
+                            fluid=True, chemical=out.get("id")))
 
     elif rtype == "mekanism:washing":
         chem_in = data.get("chemical_input", {})
         if chem_in:
-            inputs.append(Slot(tag=None, item=chem_in.get("chemical"),
-                               count=float(chem_in.get("amount", 1)), fluid=True))
+            inputs.append(Slot(tag=None, item=None, count=float(chem_in.get("amount", 1)),
+                               fluid=True, chemical=chem_in.get("chemical")))
         fluid_in = data.get("fluid_input", {})
         if fluid_in:
             aux_inputs.append(Slot(tag=fluid_in.get("tag"), item=fluid_in.get("fluid"),
                                    count=float(fluid_in.get("amount", 1)), fluid=True))
         out = data.get("output", {})
-        outputs.append(Slot(tag=None, item=out.get("id"), count=float(out.get("amount", 1)),
-                            fluid=True))
+        outputs.append(Slot(tag=None, item=None, count=float(out.get("amount", 1)),
+                            fluid=True, chemical=out.get("id")))
 
     elif rtype == "mekanism:crystallizing":
         chem_in = data.get("input", {})
-        inputs.append(Slot(tag=None, item=chem_in.get("chemical"),
-                           count=float(chem_in.get("amount", 1)), fluid=True))
+        inputs.append(Slot(tag=None, item=None, count=float(chem_in.get("amount", 1)),
+                           fluid=True, chemical=chem_in.get("chemical")))
         out = data.get("output", {})
         outputs.append(Slot(tag=None, item=out.get("id"), count=float(out.get("count", 1))))
 

@@ -23,7 +23,7 @@
       <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
     </div>
     <details class="adv" {{ 'open' if advanced_open }}>
-      <summary>Advanced options <span class="muted small">· skipping {{ skips|length + (1 if skip_crafting else 0) }}</span></summary>
+      <summary>Advanced options <span class="muted small">· skipping {{ skips|length + (1 if skip_crafting else 0) }}{% if skip_crafting %} (incl. crafting tables){% endif %}</span></summary>
       <div class="stack" style="gap:.9rem;padding-top:.75rem">
         <div class="row">
           <label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>
@@ -48,7 +48,8 @@
         </div>
       </div>
     </details>
-    {% if skips %}<div class="row small skip-summary" style="flex-wrap:wrap"><span class="muted">Not using:</span>
+    {% if skips or skip_crafting %}<div class="row small skip-summary" style="flex-wrap:wrap"><span class="muted">Not using:</span>
+      {% if skip_crafting %}<span class="skip-chip">Crafting tables <span class="muted xs">recipes</span></span>{% endif %}
       {% for c in skips %}<span class="skip-chip">{{ c.label }} <span class="muted xs">{{ c.sub }}</span></span>{% endfor %}
       <span class="muted xs">· change in Advanced options</span></div>{% endif %}
     <div class="row">
