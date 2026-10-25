@@ -223,3 +223,4 @@ table.t th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06
 .skip-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .skip-chips:empty { display: none; }
 .skip-chip { display: inline-flex; align-items: center; gap: 0.4rem; max-width: 100%; padding: 0.2rem 0.3rem 0.2rem 0.4rem; background: var(--background); border: 1px solid var(--border); border-radius: 999px; font-size: 0.85rem; }
+details.adv[open] + .skip-summary { display: none; }

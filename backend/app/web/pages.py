@@ -279,7 +279,7 @@ def _skip_chip(idx: DiscoveryIndex, kind: str, value: str) -> dict[str, str] | N
 async def routes_page(
     request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx,
     session: AsyncSession = Depends(get_session),
-    target: str = "", start: str = "", depth: int = Query(6, ge=1, le=10), crafting: str = "", ran: str = "",
+    target: str = "", start: str = "", depth: int = Query(6, ge=1, le=10), crafting: str = "", ran: str = "", rank: str = "auto",
     xm: list[str] = Query([]), xmod: list[str] = Query([]), xi: list[str] = Query([]),
 ):
     # `ran` marks a submitted form: an unchecked box then means "include", and empty skip lists mean "skip nothing".
@@ -302,14 +302,15 @@ async def routes_page(
                 modpack=str(scope.pack_id), modpack_version=str(scope.version_id), mod=[], game=None,
                 game_version=None, exclude=CRAFTING_TYPES if skip_crafting else [],
                 exclude_machine=pick("machine"), exclude_item=pick("item"), exclude_mod=pick("mod"),
+                rank=rank if rank in ('yield', 'simple') else 'auto',
                 allow_cycles=False, max_depth=depth, limit=25, quantity=1.0,
             )
         except HTTPException as e:
             error = str(e.detail)
-    changed = bool(ran) and (set(xm) != set(defaults) or bool(xmod) or bool(xi) or not skip_crafting or depth != 6)
+    changed = bool(ran) and (set(xm) != set(defaults) or bool(xmod) or bool(xi) or not skip_crafting or depth != 6 or rank != 'auto')
     return render(
         request, "routes.html", scope=scope, target=sel_target, start=sel_start, depth=depth,
-        skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed,
+        skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed, rank=rank,
     )
 
 

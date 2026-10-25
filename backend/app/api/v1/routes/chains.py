@@ -21,7 +21,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -377,6 +377,19 @@ class _Budget:
         return True
 
 
+def _consumed(recipe: _Recipe, item_id: str, tag_to_items: dict[str, set[str]]) -> float:
+    """How much of `item_id` one run uses, summed over every input slot it can fill. A recipe that
+    takes the item in two slots (or a slot and a tag it belongs to) must be charged for both, or the
+    yield of the route is overstated."""
+    total = 0.0
+    for s in recipe.inputs:
+        if s.is_fluid:
+            continue
+        if s.item_id == item_id or (s.tag_string and item_id in tag_to_items.get(s.tag_string, ())):
+            total += s.quantity or 1.0
+    return total
+
+
 # ── Forward DFS ───────────────────────────────────────────────────────────────
 # Each chain: list of (recipe, runs) in execution order.
 # `runs` = how many times that recipe runs, starting from 1.0 unit of start_item.
@@ -426,10 +439,10 @@ def _forward_dfs(
                 continue
             tried.add(recipe.id)
 
-            primary = next((s for s in recipe.inputs if not s.is_fluid), None)
-            if not primary:
+            consumed = _consumed(recipe, item_id, graph.tag_to_items)
+            if not consumed:
                 continue
-            runs = quantity / (primary.quantity or 1.0)
+            runs = quantity / consumed
 
             for out_slot in recipe.outputs:
                 if not out_slot.item_id or out_slot.is_fluid:
@@ -553,6 +566,16 @@ def _deepen(run, max_depth: int, enough: int = ENOUGH_CHAINS, seconds: float = 1
     return done, cycles, False
 
 
+def _has_side_inputs(steps: list[tuple[_Recipe, float]]) -> bool:
+    """True if any step also consumes some other item or tag. The search follows one item along the
+    route, so those extra materials are free in the yield figure; such routes are flagged and ranked
+    below self-contained processing chains."""
+    for r, _ in steps:
+        if len({s.item_id or "#" + (s.tag_string or "") for s in r.inputs if not s.is_fluid}) > 1:
+            return True
+    return False
+
+
 def _route_cost(steps: list[tuple[_Recipe, float]], ratio: float, higher_is_better: bool) -> float:
     """
     Lower is better. Fewer steps dominate, then fewer distinct machines (each is something to build
@@ -574,20 +597,21 @@ def _sequence(chain: list[tuple[_Recipe, float]], leaf: str = "") -> tuple:
 
 
 def _rank_forward(
-    chains: list[tuple[list, bool, int | None]], target_items: set[str],
+    chains: list[tuple[list, bool, int | None]], target_items: set[str], by_yield: bool = True,
 ) -> list[tuple[list, bool, int | None]]:
-    """Best route per distinct recipe sequence, cheapest first (loops last)."""
+    """Best route per distinct recipe sequence (loops last): highest yield first, or cheapest first."""
     best: dict[tuple, tuple[tuple, tuple]] = {}
     for entry in chains:
         chain, has_cycle, _ = entry
         if not chain:
             continue
         if has_cycle:
-            cost = (True, _route_cost(chain, 0.0, True))
+            cost = (True, False, 0.0, 0.0)
         else:
             r_last, runs_last = chain[-1]
             y = sum(s.quantity * runs_last for s in r_last.outputs if s.item_id in target_items)
-            cost = (False, _route_cost(chain, y, True))
+            simple = _route_cost(chain, y, True)
+            cost = (False, _has_side_inputs(chain), -round(y, 4), simple) if by_yield else (False, False, simple, -y)
         key = _sequence(chain)
         if key not in best or cost < best[key][0]:
             best[key] = (cost, entry)
@@ -595,15 +619,17 @@ def _rank_forward(
 
 
 def _rank_backward(
-    chains: list[tuple[list, bool, int | None, str, float]],
+    chains: list[tuple[list, bool, int | None, str, float]], by_yield: bool = False,
 ) -> list[tuple[list, bool, int | None, str, float]]:
-    """Best route per distinct recipe sequence, cheapest first (loops last). Zero-step 'routes' are dropped."""
+    """Best route per distinct recipe sequence (loops last): least raw material first, or cheapest first.
+    Zero-step 'routes' are dropped."""
     best: dict[tuple, tuple[tuple, tuple]] = {}
     for entry in chains:
         chain, has_cycle, _, raw_item, raw_qty = entry
         if not chain:
             continue
-        cost = (has_cycle, _route_cost(chain, raw_qty, False), raw_qty)
+        simple = _route_cost(chain, raw_qty, False)
+        cost = (has_cycle, round(raw_qty, 4), simple) if by_yield else (has_cycle, simple, raw_qty)
         key = _sequence(chain, raw_item)
         if key not in best or cost < best[key][0]:
             best[key] = (cost, entry)
@@ -787,6 +813,7 @@ def _build_chain_dict(
         "raw_materials_per_target": raw_materials_per_target,
         "has_cycle": has_cycle,
         "cycle_at_step": cycle_at_step,
+        "needs_other_inputs": _has_side_inputs(steps),
         "raw_inputs": raw_inputs,
         "final_outputs": final_outputs,
         "steps": serialized_steps,
@@ -1012,6 +1039,11 @@ async def get_chains(
     exclude_machine: list[str] = Query(default=[], description="Machine ids whose recipes must not be used"),
     exclude_item: list[str] = Query(default=[], description="Item ids no recipe in the route may touch"),
     exclude_mod: list[str] = Query(default=[], description="Mod namespaces: skip their recipe types and any recipe using their items"),
+    rank: Literal["auto", "yield", "simple"] = Query(
+        default="auto",
+        description="yield: most output per input (least raw per item going backward); "
+                    "simple: fewest steps and machines; auto: yield when `start` is given, else simple",
+    ),
     allow_cycles: bool = Query(default=False),
     max_depth: int = Query(default=8, ge=1, le=12),
     limit: int = Query(default=50, ge=1, le=200),
@@ -1035,6 +1067,9 @@ async def get_chains(
         return _empty_result(scope_info, target, start, "No approved recipes in scope")
 
     direction: str
+    by_yield = rank == "yield" or (rank == "auto" and start is not None)
+    # Yield rankings need the deep, high-multiplier routes too, so don't stop at the first 400 found.
+    enough = 10**9 if by_yield else ENOUGH_CHAINS
 
     if start is not None:
         direction = "forward"
@@ -1047,9 +1082,9 @@ async def get_chains(
             raw_chains, cycles_excluded, truncated = await asyncio.to_thread(
                 _deepen,
                 lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b),
-                max_depth,
+                max_depth, enough,
             )
-        raw_chains = _rank_forward(raw_chains, target_items_set)
+        raw_chains = _rank_forward(raw_chains, target_items_set, by_yield)
         memory.trim()
         total_found = len(raw_chains)
         paged = raw_chains[:limit]
@@ -1076,9 +1111,9 @@ async def get_chains(
             raw_chains_b, cycles_excluded, truncated = await asyncio.to_thread(
                 _deepen,
                 lambda d, b: _backward_dfs(target_items_list, graph, excl, d, allow_cycles, b),
-                max_depth,
+                max_depth, enough,
             )
-        raw_chains_b = _rank_backward(raw_chains_b)
+        raw_chains_b = _rank_backward(raw_chains_b, by_yield)
         memory.trim()
         total_found = len(raw_chains_b)
 
@@ -1112,6 +1147,7 @@ async def get_chains(
         "cycles_excluded": cycles_excluded,
         "excluded_applied": exclude,
         "excluded": excl.describe(),
+        "rank": "yield" if by_yield else "simple",
         "truncated": truncated,
         "chains": serialized,
     }

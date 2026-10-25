@@ -83,11 +83,29 @@ def test_deepening_finds_short_routes_when_deep_search_would_blow_the_budget():
     assert ranked and len(ranked[0][0]) == 1
 
 
-def test_forward_ranking_prefers_fewer_steps():
+def test_forward_ranking_modes():
     one = rec("t:one", "m1", [("s:a", 1)], [("t:z", 1)])
     s1 = rec("t:s1", "m2", [("s:a", 1)], [("s:b", 1)])
     s2 = rec("t:s2", "m3", [("s:b", 1)], [("t:z", 3)])
     g = graph(one, s1, s2)
     chains, _, _ = _deepen(lambda d, b: _forward_dfs(["s:a"], {"t:z"}, g, _Excluder(), d, False, b), 4)
-    ranked = _rank_forward(chains, {"t:z"})
-    assert [len(c[0]) for c in ranked] == [1, 2]
+    assert [len(c[0]) for c in _rank_forward(chains, {"t:z"}, by_yield=False)] == [1, 2]
+    # ore processing: a longer route with a better yield comes first when ranking by yield
+    assert [len(c[0]) for c in _rank_forward(chains, {"t:z"}, by_yield=True)] == [2, 1]
+
+
+def test_recipe_using_the_item_in_two_slots_is_charged_for_both():
+    mix = rec("t:mix", "mix", [("s:gem", 1), ("s:gem", 1)], [("t:z", 3)])
+    chains, _, _ = _deepen(lambda d, b: _forward_dfs(["s:gem"], {"t:z"}, graph(mix), _Excluder(), d, False, b), 2)
+    (chain, *_), = _rank_forward(chains, {"t:z"})
+    assert chain[0][1] == 0.5                      # 1 gem = half a run (not a full run)
+    assert chain[0][0].outputs[0].quantity * chain[0][1] == 1.5
+
+
+def test_routes_needing_other_items_rank_below_self_contained_ones_in_yield_mode():
+    pure = rec("t:p", "mp", [("s:a", 1)], [("t:z", 2)])
+    side = rec("t:s", "ms", [("s:a", 1), ("other:x", 1)], [("t:z", 5)])
+    g = graph(pure, side)
+    chains, _, _ = _deepen(lambda d, b: _forward_dfs(["s:a"], {"t:z"}, g, _Excluder(), d, False, b), 2)
+    ranked = _rank_forward(chains, {"t:z"}, by_yield=True)
+    assert [c[0][0][0].machine.id for c in ranked] == ["mp", "ms"]
