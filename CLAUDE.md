@@ -12,93 +12,94 @@ Reference docs: [Database schema + tech stack + env vars](docs/schema.md) · [Ar
 
 ```
 /
-├── docker-compose.yml       # db + backend + frontend
+├── docker-compose.yml       # db + backend (one image serves the API and the website)
 ├── backend/
 │   ├── app/
-│   │   ├── config.py        # pydantic-settings, reads .env
-│   │   ├── db.py            # async engine, get_session, TimestampMixin
-│   │   ├── main.py          # FastAPI app, CORS, router mounts
+│   │   ├── config.py, db.py, memory.py   # settings · engine/session · malloc_trim + RSS helpers
+│   │   ├── main.py          # app, security headers, error pages, router order (catch-alls LAST)
 │   │   ├── auth/            # password.py, tokens.py, refresh.py, oauth.py
 │   │   ├── models/          # __init__.py imports ALL models in FK order (required by Alembic)
-│   │   │   └── user, versioning, identity, recipe, status, admin
-│   │   ├── importer/
-│   │   │   └── pipeline.py  # KubeJS export ingestion CLI
-│   │   └── api/v1/routes/
-│   │       ├── auth.py      # register, login, refresh, logout, OAuth
-│   │       ├── users.py     # /me, OAuth unlink
-│   │       ├── admin.py     # member mgmt, version publish/deprecate
-│   │       ├── catalog.py   # Game/Mod/ModVersion/ModPack CRUD
-│   │       ├── chains.py    # GET /chains — DFS traversal, yield ranking
-│   │       └── recipes.py   # get, submit, review, retract, pending list
+│   │   ├── importer/pipeline.py   # KubeJS export ingestion CLI
+│   │   ├── discovery/
+│   │   │   ├── scope.py     # Scope = game + modpack + version -> set of mod_version_ids
+│   │   │   ├── index.py     # in-memory DiscoveryIndex, one per scope (max 2 cached)
+│   │   │   └── service.py   # queries shared by the JSON API and the HTML pages
+│   │   ├── api/v1/routes/   # JSON API: auth, users, admin, catalog, chains, discover, recipes
+│   │   └── web/             # server-rendered site (Jinja2 + HTMX)
+│   │       ├── pages.py, account.py, admin.py   # routes
+│   │       ├── deps.py      # scope/index deps, cookie session, CSRF (Origin) check
+│   │       ├── templating.py, templates/        # Jinja2 env + helpers; templates/partials = HTMX fragments
+│   │       └── static/      # css/app.css (hand-written), js/htmx.min.js (vendored, pinned), js/app.js
 │   ├── alembic/             # env.py + versions/
-│   ├── tests/test_auth.py   # 6 tests (register, login, profile, unauthed)
-│   └── atm10_ore_analyzer.py  # standalone CLI analyzer
-└── frontend/
-    ├── nginx.conf           # SPA fallback + /api proxy (lazy DNS via resolver 127.0.0.11)
-    ├── src/
-    │   ├── lib/             # types.ts, auth.ts (stores), api.ts (fetch wrapper), utils.ts
-    │   └── routes/
-    │       ├── +layout.ts   # ssr = false
-    │       ├── +layout.svelte  # bootAuth on mount (401 on /auth/refresh = logged out, expected)
-    │       ├── +page.svelte    # PUBLIC chain explorer (no login required)
-    │       ├── login/, register/, profile/, oauth/[provider]/callback/
-    │       └── admin/       # auth guard in admin/+layout.svelte
-    └── vite.config.ts       # MUST have tailwindcss() plugin first, then sveltekit()
+│   ├── tests/               # conftest.py (SQLite fixtures), test_auth.py, test_web.py
+│   └── atm10_ore_analyzer.py  # recipe parser used by the importer
+└── docs/
 ```
+
+There is **no Node/npm anywhere**: no build step, no bundler. Third-party browser code is vendored in
+`web/static/js/` and pinned in `web/static/README.md`.
+
+## URLs
+
+`/{game}/{pack}/{version}/...` — `version` may be `latest`; pages link to the pinned version and carry
+`<link rel=canonical>`. Everything under a scope (items, mods, machines, tags, routes) only sees that
+version's mod versions. JSON equivalent: `/api/v1/discover/{game}/{pack}/{version}/...`.
+Fixed routes (`/login`, `/admin`, `/static`, `/healthz`, `/api`) are registered before the catch-alls in
+`main.py` — keep it that way when adding routes.
 
 ---
 
 ## Running Locally
 
 ```bash
-# Backend
+docker compose up -d db
 cd backend
-cp .env.example .env        # set DATABASE_URL, JWT_SECRET, DEBUG=true
+cp .env.example .env        # set JWT_SECRET (or DEBUG=true for dev)
 uv sync
 uv run alembic upgrade head
-uv run fastapi dev app/main.py   # http://localhost:8000/docs
+uv run uvicorn app.main:app --reload   # http://localhost:8000  (API docs at /docs when DEBUG=true)
 
 uv run pytest tests/ -v     # SQLite in-memory, no Postgres needed
-uv run alembic revision --autogenerate -m "describe change"
 
-# Frontend
-cd frontend
-cp .env.production .env     # edit VITE_API_BASE to http://localhost:8000/api/v1
-npm install
-npm run dev                 # http://localhost:5173
-
-# Full stack
-docker compose up           # :8080 frontend, :8081 backend, :5432 db
+# Import recipe data (see README)
+DEBUG=false uv run python -m app.importer --export-dir ../allthemons_export
 ```
 
 > **uv note:** `alembic` and `uvicorn` are only on the uv venv PATH — always prefix with `uv run`.
+> **Importer note:** set `DEBUG=false` or SQLAlchemy echoes every statement.
+> **Process control:** don't `pkill -f`/`kill` by pattern from a shell tool; use `fuser -k 8000/tcp`.
 
 ---
 
-## Chain Calculation: Worker Processes
+## Memory (read before touching chains.py or the index)
 
-The DFS in `chains.py` is CPU-bound. It is already wrapped in `asyncio.to_thread()` so it does not block the event loop during traversal. For true CPU parallelism across simultaneous requests, run multiple uvicorn workers:
+Production target is < 8 GB total; the compose file caps the backend at 2 GB. A single process holds:
+baseline ~100 MB, one scope's index ~90 MB, one scope's recipe graph ~230 MB; at most 2 of each are cached
+(`MAX_INDEXES`, `_GRAPH_MAX`). Route searches are bounded three ways in `_Budget`: 400k node visits,
+50k collected chains, 15 s wall clock — they run in threads that cannot be cancelled, so without these a
+deep search kept allocating (~40 MB/s) long after the client disconnected (this is how a process reached 64 GB).
+Concurrent searches are limited to 2 (`_search_slots`). `memory.trim()` returns freed heap to the OS after
+builds/searches. Run ONE uvicorn worker: caches are per process.
+`GET /healthz` reports RSS and cache counts.
 
-```bash
-# Production (Docker / gunicorn)
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker
+---
 
-# Or directly
-uv run uvicorn app.main:app --workers 4
-```
+## Chain Calculation
 
-Rule of thumb: `workers = 2 × CPU_cores + 1`. For development a single worker is fine. Note that `fastapi dev` always runs 1 worker with hot-reload; use the gunicorn command for load testing.
+The DFS in `chains.py` is CPU-bound and runs in `asyncio.to_thread()` behind a 2-slot semaphore, over a
+graph cached per scope (`_get_graph`). Responses include `"truncated": true` when a cap was hit.
+Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import (both also expire on a TTL).
 
 ---
 
 ## What to Work On Next
 
-1. **Backend rate limiting** — `backend/app/api/v1/routes/chains.py`: add slowapi rate limit on `GET /chains` keyed by client IP (anonymous: ~20 req/min). Frontend already handles 429.
-
-2. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (already implemented).
-
-3. **Email wiring** — fastapi-mail for `/auth/verify` and password reset. Mail config already in `.env.example`.
-
-4. **OAuth state nonce** — server-side storage (DB or Redis) for CSRF protection. See [architecture.md](docs/architecture.md#known-issues-and-todos).
-
-5. **tags_json → Postgres ARRAY** — Alembic migration + GIN index on `item_appearances`. See [architecture.md](docs/architecture.md#12-tags_json-as-text-temporary).
+1. **Route-finder ranking** — backward search surfaces essence/reprocessor routes first; needs a cost model
+   (prefer fewer machines, avoid "essence" intermediates) and tag-aware pruning. Parser long tail (~7.4k recipes
+   of unusual mod types) is still skipped.
+2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
+3. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (API exists, no page yet).
+4. **Email wiring** — fastapi-mail for verification and password reset.
+5. **tags_json → Postgres ARRAY** — migration + GIN index. Tag member lists only include items seen in recipes.
+6. **Admin scope ids** — mod/modpack admin memberships use the *identity* id; `Recipe.modpack_id` and review
+   checks still compare against version ids. Unify.

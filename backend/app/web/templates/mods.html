@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Mods — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block wrap_class %}wide{% endblock %}
+{% block content %}
+<div class="stack">
+  <div class="row between end">
+    <h1 class="h1">Mods</h1>
+    <form method="get" action="{{ scope.url('/mods') }}" hx-get="{{ scope.url('/mods') }}" hx-trigger="input delay:200ms" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" style="width:16rem">
+      <input name="q" value="{{ q }}" placeholder="Filter mods…" aria-label="Filter mods" autocomplete="off">
+    </form>
+  </div>
+  <div id="results">
+    {% if mods %}
+    <ul class="grid cols-3">
+      {% for x in mods %}
+      <li><a class="card pad" style="display:block;height:100%" href="{{ scope.url('/mods/' ~ x.namespace) }}">
+        <div class="bold">{{ x.name }}</div>
+        <div class="muted mono xs">{{ x.namespace }}</div>
+        {% if x.description %}<p class="muted small" style="margin-top:.4rem">{{ x.description }}</p>{% endif %}
+        <div class="row xs num" style="margin-top:.7rem;gap:1rem"><span>{{ x.item_count|num }} items</span><span>{{ x.recipe_count|num }} recipes</span></div>
+      </a></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="empty">No mods match “{{ q }}”.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

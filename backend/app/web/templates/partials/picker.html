@@ -1,0 +1,18 @@
+{% import "macros.html" as m %}
+<div class="picker" id="picker-{{ which }}">
+  {% if item %}
+  <div class="picked">
+    {{ m.tile(item.name, item.namespace, 32) }}
+    <span class="grow"><span class="bold small trunc" style="display:block">{{ item.name }}</span><span class="muted mono xs trunc" style="display:block">{{ item.item_id }}</span></span>
+    <input type="hidden" name="{{ which }}" value="{{ item.item_id }}">
+    <button type="button" class="icon-btn" aria-label="Clear {{ 'start item' if which == 'start' else 'target item' }}"
+            hx-get="{{ scope.url('/_picked') }}{{ qs(which=which) }}" hx-target="#picker-{{ which }}" hx-swap="outerHTML" hx-boost="false">✕</button>
+  </div>
+  {% else %}
+  <div class="search" data-search>
+    <input type="search" name="q" form="no-form" placeholder="Search for an item…" aria-label="Search for an item" autocomplete="off"
+           hx-get="{{ scope.url('/_pick') }}{{ qs(which=which) }}" hx-trigger="input changed delay:150ms" hx-target="next .sr-list" hx-swap="innerHTML" hx-boost="false">
+    <div class="sr-list" role="listbox"></div>
+  </div>
+  {% endif %}
+</div>

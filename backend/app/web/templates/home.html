@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}RecipeBook — recipes for modded games{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <section class="stack">
+    <p class="eyebrow">Recipe database for modded games</p>
+    <h1 class="hero">Pick a game and a modpack.<br><span class="muted">Then look up any item.</span></h1>
+  </section>
+  {% for g in games %}
+  <section class="stack">
+    <div class="row between"><h2 class="h2"><a href="/{{ g.game.slug }}" class="u">{{ g.game.name }}</a></h2></div>
+    <div class="grid cols-2">
+      {% for p in g.packs %}
+      <a class="card pad" href="/{{ g.game.slug }}/{{ p.pack.slug }}/latest">
+        <div class="bold">{{ p.pack.name }}</div>
+        <div class="muted small" style="margin-top:.15rem">
+          {% if p.latest %}Latest {{ p.latest.version }}{% else %}No versions yet{% endif %}
+          {% if p.n_versions > 1 %} · {{ p.n_versions }} versions{% endif %}
+        </div>
+        {% if p.pack.description %}<p class="muted small" style="margin-top:.5rem">{{ p.pack.description }}</p>{% endif %}
+      </a>
+      {% else %}<p class="muted">No modpacks for this game yet.</p>{% endfor %}
+    </div>
+  </section>
+  {% else %}
+  <p class="empty">No games have been imported yet. Run the importer to add one.</p>
+  {% endfor %}
+</div>
+{% endblock %}

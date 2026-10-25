@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Profile — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+{% set f = form or {'display_name': profile.display_name, 'email': profile.email or '', 'bio': profile.bio or '', 'avatar_url': profile.avatar_url or ''} %}
+<div class="stack-lg">
+  <h1 class="h1">Profile</h1>
+  <form class="card pad stack" method="post" action="/profile" hx-boost="false">
+    <h2 class="h2">Personal info</h2>
+    {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+    {% if saved %}<p class="alert" role="status">Saved.</p>{% endif %}
+    <label class="field"><span>Display name</span><input name="display_name" value="{{ f.display_name }}" required minlength="2" maxlength="64"></label>
+    <label class="field"><span>Email</span><input type="email" name="email" value="{{ f.email }}"></label>
+    <label class="field"><span>Bio</span><textarea name="bio" rows="3" maxlength="500">{{ f.bio }}</textarea></label>
+    <label class="field"><span>Avatar URL</span><input name="avatar_url" value="{{ f.avatar_url }}" placeholder="https://…"></label>
+    <button class="btn primary-btn" type="submit">Save changes</button>
+  </form>
+  {% if profile.oauth_accounts %}
+  <section class="card pad stack">
+    <h2 class="h2">Linked accounts</h2>
+    {% for a in profile.oauth_accounts %}
+    <form class="row between" method="post" action="/profile/oauth/{{ a.id }}/unlink" hx-boost="false">
+      <span><span class="badge">{{ a.provider }}</span> <span class="muted small">{{ a.provider_email or 'no email' }}</span></span>
+      <button class="btn danger sm" type="submit">Unlink</button>
+    </form>
+    {% endfor %}
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

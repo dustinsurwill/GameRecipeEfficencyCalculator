@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — Admin — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <div><a class="muted small u" href="/admin">← Admin</a><h1 class="h1" style="margin-top:.25rem">{{ title }}</h1><p class="muted mono small">{{ subtitle }}</p></div>
+  {% include "admin/_flash.html" %}
+  <section class="stack"><h2 class="h2">Versions</h2>
+    {% if versions %}
+    <table class="t"><thead><tr><th>Version</th><th>Status</th><th></th></tr></thead><tbody>
+      {% for v in versions %}<tr>
+        <td class="bold">{{ v.version }}</td>
+        <td><span class="badge {{ 'warn' if v.status == 'deprecated' }}">{{ v.status }}</span></td>
+        <td style="text-align:right">
+          {% if v.status == 'draft' %}<form method="post" action="{{ base }}/versions/{{ v.id }}/publish" hx-boost="false"><button class="btn sm primary-btn">Publish</button></form>
+          {% elif v.status == 'published' %}<form method="post" action="{{ base }}/versions/{{ v.id }}/deprecate" hx-boost="false"><button class="btn sm">Deprecate</button></form>{% endif %}
+        </td></tr>{% endfor %}
+    </tbody></table>
+    {% else %}<p class="muted small">No versions yet.</p>{% endif %}
+  </section>
+  <section class="stack"><h2 class="h2">Members</h2>
+    {% if members %}
+    <table class="t"><thead><tr><th>User ID</th><th>Role</th><th></th></tr></thead><tbody>
+      {% for m in members %}<tr>
+        <td class="mono small">{{ m.user_id }}</td><td><span class="badge">{{ m.role }}</span></td>
+        <td style="text-align:right"><form method="post" action="{{ base }}/members/{{ m.user_id }}/revoke" hx-boost="false"><button class="btn sm danger">Revoke</button></form></td>
+      </tr>{% endfor %}
+    </tbody></table>
+    {% endif %}
+    <form class="row end" method="post" action="{{ base }}/members" hx-boost="false">
+      <label class="field grow"><span>User ID</span><input name="user_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required></label>
+      <label class="field"><span>Role</span><select name="role"><option value="maintainer">Maintainer</option><option value="admin">Admin</option></select></label>
+      <button class="btn primary-btn" type="submit">Add member</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Log in — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+<div class="stack-lg">
+<form class="card pad stack" method="post" action="/login" hx-boost="false">
+  <h1 class="h1">Log in</h1>
+  {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+  <input type="hidden" name="next" value="{{ next or '' }}">
+  <label class="field"><span>Email</span><input type="email" name="email" value="{{ email or '' }}" required autocomplete="username" autofocus></label>
+  <label class="field"><span>Password</span><input type="password" name="password" required autocomplete="current-password"></label>
+  <button class="btn primary-btn" type="submit">Log in</button>
+  {% include "partials/oauth_buttons.html" %}
+  <p class="muted small">No account? <a class="u primary" href="/register">Sign up</a></p>
+</form>
+</div>
+{% endblock %}

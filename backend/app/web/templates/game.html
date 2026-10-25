@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ game.name }} modpacks — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack">
+  <p class="muted small"><a href="/" class="u">All games</a></p>
+  <h1 class="h1">{{ game.name }}</h1>
+  <div class="grid cols-2">
+    {% for p in packs %}
+    <a class="card pad" href="/{{ game.slug }}/{{ p.pack.slug }}">
+      <div class="bold">{{ p.pack.name }}</div>
+      <div class="muted small">{% if p.latest %}Latest {{ p.latest.version }}{% endif %}{% if p.n_versions > 1 %} · {{ p.n_versions }} versions{% endif %}</div>
+    </a>
+    {% else %}<p class="empty">No modpacks yet.</p>{% endfor %}
+  </div>
+</div>
+{% endblock %}

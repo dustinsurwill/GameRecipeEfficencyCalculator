@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import memory
 from app.db import get_session
 from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
@@ -39,7 +41,7 @@ router = APIRouter(prefix="/chains", tags=["chains"])
 
 # ── In-memory graph structures ────────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)
 class _Slot:
     item_id: str | None
     tag_string: str | None
@@ -48,13 +50,13 @@ class _Slot:
     fluid_label: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _MachineInfo:
     id: str
     name: str
 
 
-@dataclass
+@dataclass(slots=True)
 class _Recipe:
     id: uuid.UUID
     recipe_type: str
@@ -237,6 +239,56 @@ class _RecipeGraph:
         return self._by_output.get(item_id, [])
 
 
+# ── Graph cache ───────────────────────────────────────────────────────────────
+# The graph is identical for every request against the same scope, so build it once and share it.
+# Loading it per request cost ~250 MB of transient ORM objects each, multiplied by concurrency.
+
+@dataclass(slots=True)
+class _LoadedGraph:
+    graph: _RecipeGraph
+    tag_to_items: dict[str, set[str]]
+    item_to_canonical: dict[str, str]
+    n_recipes: int
+    built_at: float
+
+
+_GRAPH_TTL = 600.0
+_GRAPH_MAX = 2  # distinct scopes kept; each is roughly 150–250 MB for an ATM10-sized pack
+_graph_cache: dict[frozenset[uuid.UUID], _LoadedGraph] = {}
+_graph_lock = asyncio.Lock()
+_search_slots = asyncio.Semaphore(2)  # concurrent DFS threads; the rest queue instead of piling up
+
+
+async def _get_graph(session: AsyncSession, mod_version_ids: set[uuid.UUID]) -> _LoadedGraph:
+    key = frozenset(mod_version_ids)
+    now = time.monotonic()
+    hit = _graph_cache.get(key)
+    if hit and now - hit.built_at < _GRAPH_TTL:
+        return hit
+    async with _graph_lock:
+        hit = _graph_cache.get(key)
+        if hit and time.monotonic() - hit.built_at < _GRAPH_TTL:
+            return hit
+        recipes, tag_to_items, item_to_canonical = await _load_recipe_graph(session, set(key))
+        loaded = _LoadedGraph(
+            graph=_RecipeGraph(recipes, tag_to_items),
+            tag_to_items=tag_to_items,
+            item_to_canonical=item_to_canonical,
+            n_recipes=len(recipes),
+            built_at=time.monotonic(),
+        )
+        _graph_cache[key] = loaded
+        while len(_graph_cache) > _GRAPH_MAX:
+            oldest = min(_graph_cache, key=lambda k: _graph_cache[k].built_at)
+            del _graph_cache[oldest]
+        memory.trim()
+        return loaded
+
+
+def invalidate_graph_cache() -> None:
+    _graph_cache.clear()
+
+
 # ── Tag / item resolution ─────────────────────────────────────────────────────
 
 def _resolve(value: str, tag_to_items: dict[str, set[str]]) -> list[str]:
@@ -246,10 +298,19 @@ def _resolve(value: str, tag_to_items: dict[str, set[str]]) -> list[str]:
 
 
 class _Budget:
-    """Caps DFS node visits — packs with crafting recipes have effectively unbounded paths."""
+    """
+    Hard caps on a DFS: packs with crafting recipes have effectively unbounded paths, and the
+    search runs in a thread that cannot be cancelled. Without all three limits a deep search keeps
+    collecting chains (tens of MB/s) long after the client has gone away.
+    """
 
-    def __init__(self, limit: int = 400_000) -> None:
+    def __init__(
+        self, limit: int = 400_000, max_chains: int = 50_000, seconds: float = 15.0
+    ) -> None:
         self.left = limit
+        self.chains = 0
+        self.max_chains = max_chains
+        self.deadline = time.monotonic() + seconds
         self.hit = False
 
     def spend(self) -> bool:
@@ -257,6 +318,19 @@ class _Budget:
             self.hit = True
             return False
         self.left -= 1
+        if not self.left & 1023 and time.monotonic() > self.deadline:
+            self.left = 0
+            self.hit = True
+            return False
+        return True
+
+    def add_chain(self) -> bool:
+        """Record a collected chain; False means the cap is reached and the DFS should unwind."""
+        self.chains += 1
+        if self.chains >= self.max_chains:
+            self.left = 0
+            self.hit = True
+            return False
         return True
 
 
@@ -290,11 +364,13 @@ def _forward_dfs(
 
         if item_id in target_items:
             all_chains.append((list(steps), False, None))
+            budget.add_chain()
             return
 
         if item_id in path:
             if allow_cycles:
                 all_chains.append((list(steps), True, depth))
+                budget.add_chain()
             else:
                 cycles_excluded += 1
             return
@@ -361,6 +437,7 @@ def _backward_dfs(
         if item_id in path:
             if allow_cycles:
                 all_chains.append((list(reversed(steps_rev)), True, depth, item_id, quantity))
+                budget.add_chain()
             else:
                 cycles_excluded += 1
             return
@@ -370,6 +447,7 @@ def _backward_dfs(
         if not producing:
             # Leaf — item_id is a raw material
             all_chains.append((list(reversed(steps_rev)), False, None, item_id, quantity))
+            budget.add_chain()
             return
 
         new_path = path | {item_id}
@@ -830,7 +908,7 @@ async def get_chains(
     game_version: str | None = Query(default=None, description="Game version UUID or version string"),
     exclude: list[str] = Query(default=[], description="Namespace ('mekanism') or recipe_type ('mekanism:purifying') to exclude"),
     allow_cycles: bool = Query(default=False),
-    max_depth: int = Query(default=10, ge=1, le=15),
+    max_depth: int = Query(default=8, ge=1, le=12),
     limit: int = Query(default=50, ge=1, le=200),
     quantity: float = Query(default=1.0, gt=0.0),
 ) -> dict[str, Any]:
@@ -839,7 +917,8 @@ async def get_chains(
         session, modpack, modpack_version, mod, game, game_version
     )
 
-    recipes, tag_to_items, item_to_canonical = await _load_recipe_graph(session, mod_version_ids)
+    loaded = await _get_graph(session, mod_version_ids)
+    tag_to_items, item_to_canonical, graph = loaded.tag_to_items, loaded.item_to_canonical, loaded.graph
 
     target_items_list = _resolve(target, tag_to_items)
     if not target_items_list:
@@ -847,10 +926,9 @@ async def get_chains(
 
     target_items_set = set(target_items_list)
 
-    if not recipes:
+    if not loaded.n_recipes:
         return _empty_result(scope_info, target, start, "No approved recipes in scope")
 
-    graph = _RecipeGraph(recipes, tag_to_items)
     direction: str
 
     if start is not None:
@@ -859,11 +937,13 @@ async def get_chains(
         if not start_items:
             return _empty_result(scope_info, target, start, "No items found for start")
 
-        budget = _Budget()
-        raw_chains, cycles_excluded = await asyncio.to_thread(
-            _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles, budget,
-        )
+        async with _search_slots:
+            budget = _Budget()
+            raw_chains, cycles_excluded = await asyncio.to_thread(
+                _forward_dfs, start_items, target_items_set, graph, exclude, max_depth, allow_cycles, budget,
+            )
         raw_chains = _dedup_forward(raw_chains)
+        memory.trim()
         total_found = len(raw_chains)
 
         def _yield_key(entry: tuple) -> float:
@@ -897,11 +977,13 @@ async def get_chains(
     else:
         direction = "backward"
 
-        budget = _Budget()
-        raw_chains_b, cycles_excluded = await asyncio.to_thread(
-            _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles, budget,
-        )
+        async with _search_slots:
+            budget = _Budget()
+            raw_chains_b, cycles_excluded = await asyncio.to_thread(
+                _backward_dfs, target_items_list, graph, exclude, max_depth, allow_cycles, budget,
+            )
         raw_chains_b = _dedup_backward(raw_chains_b)
+        memory.trim()
         total_found = len(raw_chains_b)
 
         raw_chains_b.sort(key=lambda e: (e[1], e[4]))  # (has_cycle, raw_qty)

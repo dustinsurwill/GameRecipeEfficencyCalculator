@@ -53,14 +53,17 @@ Tag memberships stored as JSON string for SQLite test compatibility. **Migrate t
 ## 14. Alembic env.py imports app.models
 `alembic/env.py` does `import app.models` → triggers `__init__.py` → all table models in FK order. When adding a new model file, add it to `app/models/__init__.py`, not `env.py`.
 
-## 15. OAuth callback uses URL fragment
-Redirect to `{frontend_url}/oauth/{provider}/callback#{access_token}`. Fragment never sent to server. Refresh token set as httpOnly cookie on the redirect. Frontend reads `window.location.hash.slice(1)` in onMount and clears with `history.replaceState`.
+## 15. Server-rendered site (Jinja2 + HTMX), no Node
+The UI moved from a SvelteKit SPA to templates served by FastAPI. Reasons: npm supply-chain exposure (build and dev machines), item/recipe pages are public content that should be real, indexable, shareable URLs, and the index already lives in the API process so a page is a dict lookup plus a template. HTMX is a single vendored file; CSS is hand-written. `hx-boost` on `<body>` makes navigation AJAX with real URLs; filters use `hx-select` against the same page URL (no separate fragment endpoints); only typeahead, "show more" and the route-finder picker have `_fragment` routes. Every page works without JS except live typeahead.
 
-## 16. Frontend is CSR-only
-`export const ssr = false` in `frontend/src/routes/+layout.ts`. Refresh token is httpOnly cookie scoped to API domain — SSR can't forward it. Auth bootstrapped client-side via `bootAuth()` (POST to `/auth/refresh` on every page load; 401 = logged out, expected and handled silently).
+## 16. Sessions: cookie for the site, Bearer for the JSON API
+The site stores the same DB-backed refresh JWT in an `HttpOnly; SameSite=Lax; Path=/` cookie (`rb_session`) and loads the user from the DB on each request (roles are never stale; logout revokes server-side). State-changing requests also require `Origin`/`Referer` to match `Host` (`same_origin`). Admin pages call the JSON API's handler functions directly with an identity built from the session, so permission checks live in one place. OAuth: `/auth/oauth/{provider}` sets a `state` cookie, the provider callback (`/api/v1/auth/oauth/{provider}/callback`) verifies it, then starts a session and redirects home.
 
-## 17. Svelte 5 runes throughout
-Use `$state`, `$derived`, `$effect`, `$props` — not Svelte 4's `export let`, `$:`, `writable`. Exception: auth state (`accessToken`, `currentUser`) uses Svelte stores so they can be imported outside components.
+## 17. Everything is scoped: game → modpack → version
+`discovery.scope.Scope` resolves `(game_slug, pack_slug, version|latest)` to the set of mod_version_ids pinned by that modpack version. Index, recipe queries and chain graph are all filtered by it and cached per scope (max 2 each). Items, machines, tags and recipes from other games/versions never appear. Unpublished packs still resolve (so a fresh import is browsable) but published versions win for `latest`.
+
+## 18. Memory is bounded by construction
+See "Memory" in CLAUDE.md. Incident: a process reached 64 GB after a few deep route lookups — the DFS ran in an uncancellable thread with no cap on visited nodes or collected chains, kept running after the client disconnected, and re-loaded the whole graph per request. Fixes: shared per-scope graph cache, 3-way search budget (visits / chains / seconds), 2 concurrent searches, max depth 12, `malloc_trim` after builds, 2 GB container limit. Regression tests cover the budget.
 
 ---
 
@@ -70,7 +73,7 @@ Use `$state`, `$derived`, `$effect`, `$props` — not Svelte 4's `export let`, `
 1. **test_pending_recipes scoping simplified** — any mod admin sees ALL pending recipes. Should join through `recipe_mod_version_links → mod_versions → mods`. See comment in `backend/app/api/v1/routes/recipes.py`.
 2. **tags_json → Postgres ARRAY** — migrate `item_appearances.tags_json` to `TEXT[]` + GIN index.
 3. **Email verification not wired** — fastapi-mail in pyproject.toml but no `/auth/verify` or password reset flow.
-4. **OAuth state nonce needs server-side storage** — state param returned but not stored server-side for CSRF verification.
+4. **Route-finder ranking** — see CLAUDE.md "What to Work On Next".
 
 ### Low priority
 5. **pgvector for item identity matching** — embeddings of (item_name + tags) to suggest identity matches during import.

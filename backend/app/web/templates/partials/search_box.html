@@ -1,0 +1,10 @@
+{# Typeahead: the server renders result rows; app.js adds arrow-key navigation. #}
+<div class="search{{ ' search-lg' if large }}" data-search role="search">
+  <form action="{{ scope.url('/items') }}" method="get" autocomplete="off">
+    <input type="search" name="q" placeholder="{{ placeholder or 'Search items, mods, machines, tags…' }}" aria-label="Search"
+           {% if autofocus %}autofocus{% endif %}
+           hx-get="{{ scope.url('/_search') }}" hx-trigger="input changed delay:120ms" hx-target="next .sr-list" hx-swap="innerHTML"
+           hx-boost="false" role="combobox" aria-controls="sr-{{ 'lg' if large else 'nav' }}">
+    <div class="sr-list" id="sr-{{ 'lg' if large else 'nav' }}" role="listbox"></div>
+  </form>
+</div>

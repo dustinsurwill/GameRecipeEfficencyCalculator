@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}#{{ tag.id }} — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block wrap_class %}wide{% endblock %}
+{% block content %}
+<div class="stack">
+  <header class="stack" style="gap:.25rem">
+    <p class="eyebrow">Item tag</p>
+    <h1 class="h1">#{{ tag.id }}</h1>
+    <p class="muted small" style="max-width:40rem">Recipes that ask for this tag accept any of its {{ tag.members|length|num }} items interchangeably.</p>
+  </header>
+  {% set base = scope.url('/tag') %}
+  <div class="tabs" role="tablist">
+    <a class="tab" role="tab" aria-selected="{{ 'true' if tab == 'members' else 'false' }}" href="{{ base }}{{ qs(id=tag.id) }}">Items in this tag<span class="n">{{ tag.members|length|num }}</span></a>
+    <a class="tab" role="tab" aria-selected="{{ 'true' if tab == 'recipes' else 'false' }}" href="{{ base }}{{ qs(id=tag.id, tab='recipes') }}">Recipes that use it<span class="n">{{ tag.recipe_count|num }}</span></a>
+  </div>
+  {% if tab == 'members' %}
+    {% if tag.members %}<div class="grid cols-3">{% for it in tag.members %}{{ m.item_card(it, scope) }}{% endfor %}</div>
+    {% else %}<p class="empty">No items with this tag appear in recipes.</p>{% endif %}
+  {% else %}
+    <div class="recipes">{{ m.recipe_list(recipes, scope, None, next_offset, left, total, shown, rec_params) }}</div>
+  {% endif %}
+</div>
+{% endblock %}

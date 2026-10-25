@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Items — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block wrap_class %}wide{% endblock %}
+{% block content %}
+<div class="stack">
+  <div class="row between end"><h1 class="h1">Items</h1><p class="muted small num">{{ total|num }} item{{ '' if total == 1 else 's' }}</p></div>
+
+  {# Filters re-request this same page and swap in only #results (hx-select), keeping the URL shareable. #}
+  <form class="row" method="get" action="{{ scope.url('/items') }}"
+        hx-get="{{ scope.url('/items') }}" hx-trigger="input delay:250ms from:find input[name=q], change" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-sync="this:replace">
+    <input name="q" value="{{ f.q }}" placeholder="Filter by name or id…" aria-label="Filter items" class="grow" style="min-width:14rem" autocomplete="off">
+    <label class="row small">Sort
+      <select name="sort">
+        <option value="name" {{ 'selected' if f.sort == 'name' }}>Name</option>
+        <option value="used_in" {{ 'selected' if f.sort == 'used_in' }}>Most used in recipes</option>
+        <option value="made_by" {{ 'selected' if f.sort == 'made_by' }}>Most ways to make</option>
+      </select></label>
+    <label class="inline"><input type="checkbox" name="craftable" value="1" {{ 'checked' if f.craftable }}> Has a recipe</label>
+    {% if f.mod %}<input type="hidden" name="mod" value="{{ f.mod }}">{% endif %}
+    {% if f.tag %}<input type="hidden" name="tag" value="{{ f.tag }}">{% endif %}
+    <noscript><button class="btn" type="submit">Apply</button></noscript>
+  </form>
+
+  <div id="results" class="stack">
+    {% if f.mod or f.tag %}
+    <div class="row small">
+      {% if f.mod %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable)) }}">Mod: {{ f.mod }} ✕</a>{% endif %}
+      {% if f.tag %}<a class="pill" href="{{ scope.url('/items' ~ qs(q=f.q, mod=f.mod, sort=f.sort if f.sort != 'name', craftable=f.craftable)) }}">Tag: #{{ f.tag }} ✕</a>{% endif %}
+    </div>
+    {% endif %}
+    {% if items %}
+    <div class="grid cols-3">{% for it in items %}{{ m.item_card(it, scope) }}{% endfor %}</div>
+    {{ m.pager(page, pages, scope.url('/items' ~ qs(q=f.q, mod=f.mod, tag=f.tag, sort=f.sort if f.sort != 'name', craftable=f.craftable))) }}
+    {% else %}<p class="empty">No items match. Try a shorter search or clear the filters.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

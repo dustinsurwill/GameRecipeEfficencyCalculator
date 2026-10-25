@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} — RecipeBook{% endblock %}
+{% block content %}
+<div class="empty" style="padding-top:5rem">
+  <p class="h1" style="color:var(--foreground)">{{ title }}</p>
+  <p style="margin-top:.5rem">{{ detail }}</p>
+  <p style="margin-top:1.5rem"><a class="btn" href="{{ scope.url() if scope else '/' }}">{{ 'Back to ' ~ scope.pack_name if scope else 'Back to home' }}</a></p>
+</div>
+{% endblock %}

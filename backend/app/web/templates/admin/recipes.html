@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Recipe queue — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack">
+  <div><a class="muted small u" href="/admin">← Admin</a><h1 class="h1" style="margin-top:.25rem">Recipe queue</h1></div>
+  {% include "admin/_flash.html" %}
+  {% if recipes %}
+  <div class="stack">
+    {% for r in recipes %}
+    <form class="card pad stack" style="gap:.75rem" method="post" action="/admin/recipes/{{ r.id }}/review" hx-boost="false">
+      <input type="hidden" name="offset" value="{{ offset }}">
+      <div class="row between"><span class="badge">{{ r.recipe_type }}</span><span class="muted xs">Priority {{ r.source_priority }} · {{ r.created_at.strftime('%Y-%m-%d') }}</span></div>
+      <code style="word-break:break-all">{{ r.import_key }}</code>
+      <label class="field"><span>Reason <span class="field-hint">· required to reject</span></span><input name="reason" maxlength="2000"></label>
+      <div class="row"><button class="btn primary-btn" name="decision" value="approved" type="submit">Approve</button>
+        <button class="btn danger" name="decision" value="rejected" type="submit">Reject</button></div>
+    </form>
+    {% endfor %}
+  </div>
+  <nav class="pager">
+    <a class="btn" {% if offset > 0 %}href="/admin/recipes?offset={{ [offset - 20, 0]|max }}"{% else %}aria-disabled="true"{% endif %}>← Previous</a>
+    <a class="btn" {% if has_more %}href="/admin/recipes?offset={{ offset + 20 }}"{% else %}aria-disabled="true"{% endif %}>Next →</a>
+  </nav>
+  {% else %}<p class="empty">Nothing is waiting for review.</p>{% endif %}
+</div>
+{% endblock %}

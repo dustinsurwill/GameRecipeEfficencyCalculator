@@ -10,6 +10,7 @@ Auth routes:
   POST /auth/oauth/{provider}/connect  — link OAuth to existing account
                                           (requires auth)
 """
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -17,7 +18,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.auth.oauth import (
@@ -58,6 +58,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 Session = Annotated[AsyncSession, Depends(get_session)]
 
 REFRESH_COOKIE = "refresh_token"
+OAUTH_STATE_COOKIE = "oauth_state"
+OAUTH_STATE_PATH = "/api/v1/auth/oauth"   # cookie is only sent to the OAuth endpoints
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -212,25 +214,31 @@ async def logout(request: Request, response: Response, session: Session) -> None
 
 # ── OAuth flows ───────────────────────────────────────────────────────────────
 
-@router.get("/oauth/{provider}")
-async def oauth_redirect(provider: str, request: Request) -> dict:
-    """Step 1: return the URL the frontend should redirect the user to."""
+def start_oauth(provider: str, request: Request) -> tuple[str, str]:
+    """Build the provider authorization URL. Returns (url, state); the caller must store `state`
+    in the OAUTH_STATE_COOKIE so the callback can verify the round trip (CSRF protection)."""
     if provider not in PROVIDER_META:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown provider: {provider}")
     if provider not in get_enabled_providers():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"{provider} not configured")
-
     meta = PROVIDER_META[provider]
     client = meta["client_factory"]()
     redirect_uri = str(request.url_for("oauth_callback", provider=provider))
+    return client.create_authorization_url(meta["authorize_url"], redirect_uri=redirect_uri)
 
-    # State is a random value stored in session to prevent CSRF
-    # For a full implementation, store this in a short-lived server-side session
-    # or a signed cookie. Simplified here for clarity.
-    uri, state = client.create_authorization_url(
-        meta["authorize_url"],
-        redirect_uri=redirect_uri,
+
+def set_state_cookie(response: Response, state: str) -> None:
+    response.set_cookie(
+        OAUTH_STATE_COOKIE, state, httponly=True, secure=not settings.debug, samesite="lax",
+        max_age=600, path=OAUTH_STATE_PATH,
     )
+
+
+@router.get("/oauth/{provider}")
+async def oauth_redirect(provider: str, request: Request, response: Response) -> dict:
+    """Step 1 (JSON clients): return the URL to send the user to, and set the state cookie."""
+    uri, state = start_oauth(provider, request)
+    set_state_cookie(response, state)
     return {"authorization_url": uri, "state": state}
 
 
@@ -242,14 +250,14 @@ async def oauth_callback(
     request: Request,
     session: Session,
 ) -> RedirectResponse:
-    """Step 2: exchange code for tokens, find or create user, redirect to frontend.
+    """Step 2: verify state, exchange the code, find or create the user, start a web session."""
+    from app.web.deps import start_session
 
-    The access token is placed in the URL fragment (#token) so it is never
-    sent to any server — only the browser sees it. The refresh token is set
-    as an httpOnly cookie on the redirect response.
-    """
     if provider not in PROVIDER_META:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown provider: {provider}")
+    expected = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not expected or not secrets.compare_digest(expected, state):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Login session expired or invalid. Please try again.")
 
     meta = PROVIDER_META[provider]
     client = meta["client_factory"]()
@@ -264,14 +272,12 @@ async def oauth_callback(
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Token exchange failed: {e}")
 
-    fetcher = PROFILE_FETCHERS[provider]
-    profile = await fetcher(client, token)
+    profile = await PROFILE_FETCHERS[provider](client, token)
+    user = await _oauth_user(session, profile)
 
-    frontend_callback = f"{settings.frontend_url}/oauth/{provider}/callback"
-    redirect = RedirectResponse(frontend_callback, status_code=302)
-    token_data = await _oauth_find_or_create(session, redirect, request, profile)
-
-    redirect.headers["location"] = f"{frontend_callback}#{token_data['access_token']}"
+    redirect = RedirectResponse("/", status_code=303)
+    await start_session(redirect, session, user, request)
+    redirect.delete_cookie(OAUTH_STATE_COOKIE, path=OAUTH_STATE_PATH)
     return redirect
 
 
@@ -344,14 +350,9 @@ def _make_oauth_account(profile: OAuthProviderProfile, user_id: uuid.UUID) -> OA
     )
 
 
-async def _oauth_find_or_create(
-    session: AsyncSession,
-    response: Response,
-    request: Request,
-    profile: OAuthProviderProfile,
-) -> dict:
+async def _oauth_user(session: AsyncSession, profile: OAuthProviderProfile) -> User:
     """
-    Find existing OAuthAccount → get its User → issue tokens.
+    Find existing OAuthAccount → get its User.
     If no OAuthAccount exists → create new User + OAuthAccount.
 
     Deliberately does NOT match on email to avoid account hijacking.
@@ -386,8 +387,4 @@ async def _oauth_find_or_create(
 
     await session.commit()
     await session.refresh(user)
-    # Explicitly load oauth_accounts for the response
-    await session.exec(
-        select(User).where(User.id == user.id).options(selectinload(User.oauth_accounts))
-    )
-    return await _issue_tokens(session, response, user, request)
+    return user

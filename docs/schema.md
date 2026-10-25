@@ -62,21 +62,19 @@
 | Test DB | aiosqlite | — | in-memory SQLite for tests |
 | Linter | ruff | ≥0.6 | |
 
-### Frontend
+### Website
 | Concern | Library | Version | Notes |
 |---|---|---|---|
-| Framework | SvelteKit | 2.x | adapter-static, CSR-only |
-| Language | TypeScript | 6.x | strict mode |
-| Styling | Tailwind CSS | 4.x | CSS-first, `@tailwindcss/vite` plugin |
-| UI components | bits-ui + shadcn-svelte | 2.x | Tailwind v4 CSS variables |
-| Icons | @lucide/svelte | 1.x | |
-| Build tool | Vite | 7.x | NOTE: pinned to 7.x — Vite 8 breaks @tailwindcss/vite in prod builds via rolldown |
-| Web server | nginx | alpine | SPA fallback + /api proxy |
+| Templates | Jinja2 | 3.x | autoescape on; fragments in `templates/partials/` |
+| Interactivity | HTMX | 2.0.4 | vendored in `web/static/js`, pinned + hashed in `web/static/README.md`; `allowEval` off |
+| Styling | hand-written CSS | — | `web/static/css/app.css`, light/dark tokens, no build |
+| Small JS | `web/static/js/app.js` | — | theme toggle, `/` shortcut, typeahead arrow keys; everything else works without JS |
+| CSP | — | — | `script-src 'self'; style-src 'self'` (inline style attributes only) |
 
 ### Infrastructure
 - PostgreSQL 18 (docker: `postgres:18-alpine`)
-- Docker Compose: db + backend + frontend services
-- nginx: per-request DNS via `resolver 127.0.0.11` + `set $backend` variable (required for Docker service discovery)
+- Docker Compose: db + backend (the backend serves the website, the JSON API and static files)
+- Backend image runs as non-root, `MALLOC_ARENA_MAX=2`, one uvicorn worker, 2 GB container cap
 - uv: Python package manager — always prefix commands with `uv run` (e.g. `uv run alembic`, `uv run uvicorn`)
 
 ---
@@ -95,9 +93,6 @@ Optional (features disabled if blank):
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
 - `AUTHENTIK_CLIENT_ID` / `AUTHENTIK_CLIENT_SECRET` / `AUTHENTIK_BASE_URL`
 - `MAIL_*` — email verification, password reset
-- `FRONTEND_URL` — default `http://localhost:5173` (dev) / `http://localhost` (prod)
-- `DEBUG` — `true` enables /docs and HTTP cookies
+- `FRONTEND_URL` — leave empty unless a different browser origin calls the JSON API (enables CORS)
+- `DEBUG` — `true` enables /docs, HTTP cookies and the placeholder JWT secret
 
-### Frontend
-- `VITE_API_BASE=http://localhost:8000/api/v1` in `frontend/.env` for local dev
-- Production value `/api/v1` committed in `frontend/.env.production`

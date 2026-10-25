@@ -1,9 +1,12 @@
 """
-In-memory discovery index.
+In-memory discovery index, one per scope (game + modpack + version).
 
 Items, mods, machines and tags are small (tens of thousands of rows) and read far
 more often than they change (only on import), so they are loaded once and served
 from memory with a short TTL. Recipe hydration still goes to the database.
+
+At most MAX_INDEXES scopes are held; the oldest-built one is dropped, so memory
+stays bounded no matter how many games, packs and versions exist.
 """
 from __future__ import annotations
 
@@ -16,11 +19,15 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import memory
+from app.discovery.scope import Scope
 from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeSlot
-from app.models.versioning import Mod
+from app.models.status import RecipeStatus
+from app.models.versioning import Mod, ModVersion
 
 TTL_SECONDS = 300
+MAX_INDEXES = 2
 
 
 def pretty_name(ident: str) -> str:
@@ -46,21 +53,31 @@ class DiscoveryIndex:
         self.tags: list[dict[str, Any]] = []
         self.tags_by_id: dict[str, dict[str, Any]] = {}
         self.recipe_total = 0
+        self.scope: Scope | None = None
         self._keys: list[tuple[str, str]] = []   # (lower name, lower item_id), parallel to items
 
     # ── Build ────────────────────────────────────────────────────────────────
 
     @classmethod
-    async def build(cls, session: AsyncSession) -> "DiscoveryIndex":
+    async def build(cls, session: AsyncSession, scope: Scope) -> "DiscoveryIndex":
         ix = cls()
+        ix.scope = scope
+        in_scope = Recipe.id.in_(scope.recipe_ids()) & (Recipe.status == RecipeStatus.APPROVED)
+        slot_in_scope = RecipeSlot.recipe_id.in_(select(Recipe.id).where(in_scope))
 
-        mod_rows = (await session.exec(select(Mod))).scalars().all()
+        mod_rows = (await session.exec(
+            select(Mod).where(Mod.id.in_(
+                select(ModVersion.mod_id).where(ModVersion.id.in_(scope.mod_version_ids))
+            ))
+        )).scalars().all()
         mod_name = {m.namespace: m.name for m in mod_rows}
 
         # recipe counts
-        ix.recipe_total = (await session.exec(select(func.count()).select_from(Recipe))).scalar_one()
+        ix.recipe_total = (await session.exec(
+            select(func.count()).select_from(Recipe).where(in_scope)
+        )).scalar_one()
         type_counts = (await session.exec(
-            select(Recipe.recipe_type, func.count()).group_by(Recipe.recipe_type)
+            select(Recipe.recipe_type, func.count()).where(in_scope).group_by(Recipe.recipe_type)
         )).all()
         recipes_per_ns: dict[str, int] = {}
         for rtype, n in type_counts:
@@ -68,23 +85,23 @@ class DiscoveryIndex:
             recipes_per_ns[ns] = recipes_per_ns.get(ns, 0) + n
 
         machine_counts = dict((await session.exec(
-            select(Recipe.machine_identity_id, func.count()).group_by(Recipe.machine_identity_id)
+            select(Recipe.machine_identity_id, func.count()).where(in_scope).group_by(Recipe.machine_identity_id)
         )).all())
 
         # per-appearance recipe counts
         made_by = dict((await session.exec(
             select(RecipeSlot.item_appearance_id, func.count(func.distinct(RecipeSlot.recipe_id)))
-            .where(RecipeSlot.slot_type == "output", RecipeSlot.item_appearance_id.is_not(None))
+            .where(slot_in_scope, RecipeSlot.slot_type == "output", RecipeSlot.item_appearance_id.is_not(None))
             .group_by(RecipeSlot.item_appearance_id)
         )).all())
         used_direct = dict((await session.exec(
             select(RecipeSlot.item_appearance_id, func.count(func.distinct(RecipeSlot.recipe_id)))
-            .where(RecipeSlot.slot_type.in_(("input", "aux_input")), RecipeSlot.item_appearance_id.is_not(None))
+            .where(slot_in_scope, RecipeSlot.slot_type.in_(("input", "aux_input")), RecipeSlot.item_appearance_id.is_not(None))
             .group_by(RecipeSlot.item_appearance_id)
         )).all())
         tag_recipe_counts = dict((await session.exec(
             select(RecipeSlot.tag_string, func.count(func.distinct(RecipeSlot.recipe_id)))
-            .where(RecipeSlot.tag_string.is_not(None), RecipeSlot.slot_type.in_(("input", "aux_input")))
+            .where(slot_in_scope, RecipeSlot.tag_string.is_not(None), RecipeSlot.slot_type.in_(("input", "aux_input")))
             .group_by(RecipeSlot.tag_string)
         )).all())
 
@@ -92,6 +109,7 @@ class DiscoveryIndex:
         rows = (await session.exec(
             select(ItemAppearance, ItemIdentity.canonical_name)
             .join(ItemIdentity, ItemIdentity.id == ItemAppearance.identity_id)
+            .where(ItemAppearance.mod_version_id.in_(scope.mod_version_ids))
         )).all()
         tag_members: dict[str, int] = {}
         items_per_ns: dict[str, int] = {}
@@ -129,7 +147,9 @@ class DiscoveryIndex:
         ix.mods_by_ns = {m["namespace"]: m for m in ix.mods}
 
         # machines
-        for mc in (await session.exec(select(MachineIdentity))).scalars().all():
+        for mc in (await session.exec(
+            select(MachineIdentity).where(MachineIdentity.game_id == scope.game_id)
+        )).scalars().all():
             types = json.loads(mc.recipe_types_json or "[]")
             ns = _namespace_of(types[0]) if types else "minecraft"
             row = {
@@ -151,6 +171,9 @@ class DiscoveryIndex:
                 "recipe_count": tag_recipe_counts.get(t, 0),
             })
         ix.tags_by_id = {t["id"]: t for t in ix.tags}
+        # machines with no recipes in this scope belong to other packs/versions
+        ix.machines = [m for m in ix.machines if m["recipe_count"]]
+        ix.machines_by_id = {uuid.UUID(m["id"]): m for m in ix.machines}
         return ix
 
     # ── Queries ──────────────────────────────────────────────────────────────
@@ -217,22 +240,25 @@ class DiscoveryIndex:
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
-_index: DiscoveryIndex | None = None
-_built_at = 0.0
+_indexes: dict[uuid.UUID, tuple[float, DiscoveryIndex]] = {}   # scope key -> (built_at, index)
 _lock = asyncio.Lock()
 
 
-async def get_index(session: AsyncSession) -> DiscoveryIndex:
-    global _index, _built_at
-    if _index is not None and time.monotonic() - _built_at < TTL_SECONDS:
-        return _index
+async def get_index(session: AsyncSession, scope: Scope) -> DiscoveryIndex:
+    hit = _indexes.get(scope.key)
+    if hit and time.monotonic() - hit[0] < TTL_SECONDS:
+        return hit[1]
     async with _lock:
-        if _index is None or time.monotonic() - _built_at >= TTL_SECONDS:
-            _index = await DiscoveryIndex.build(session)
-            _built_at = time.monotonic()
-    return _index
+        hit = _indexes.get(scope.key)
+        if hit and time.monotonic() - hit[0] < TTL_SECONDS:
+            return hit[1]
+        ix = await DiscoveryIndex.build(session, scope)
+        _indexes[scope.key] = (time.monotonic(), ix)
+        while len(_indexes) > MAX_INDEXES:
+            del _indexes[min(_indexes, key=lambda k: _indexes[k][0])]
+        memory.trim()
+        return ix
 
 
 def invalidate() -> None:
-    global _index
-    _index = None
+    _indexes.clear()

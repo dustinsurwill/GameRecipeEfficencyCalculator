@@ -19,16 +19,16 @@ cd GameRecipeEfficencyCalculator
 cp backend/.env.example backend/.env
 # Edit backend/.env — set JWT_SECRET at minimum:
 #   JWT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
-#   DEBUG=true
 
-docker compose up
+export JWT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
+docker compose up --build
 ```
 
-- Frontend: http://localhost:8080
-- API docs: http://localhost:8081/docs (only in DEBUG mode)
+- Website + API: http://localhost:8080 (API docs at `/docs` only when `DEBUG=true`)
 - Database: localhost:5432 (user/pass: `recipebook`)
 
-The API container runs `alembic upgrade head` automatically on startup.
+The container runs `alembic upgrade head` on startup, as a non-root user, capped at 2 GB.
+Then import data (below) and open `/minecraft/atm10/latest`.
 
 ---
 
@@ -41,19 +41,12 @@ cd backend
 cp .env.example .env      # fill in DATABASE_URL, JWT_SECRET; set DEBUG=true
 uv sync
 alembic upgrade head
-uv run fastapi dev app/main.py
-# → http://localhost:8000/docs
+uv run uvicorn app.main:app --reload
+# → http://localhost:8000   (API docs: /docs when DEBUG=true)
 ```
 
-**Frontend** (Node 20+):
-
-```bash
-cd frontend
-npm install
-# frontend/.env already points at localhost:8000 for dev
-npm run dev
-# → http://localhost:5173
-```
+The website is server-rendered (Jinja2 + HTMX) by the same process — there is no frontend build
+and no Node. Edit templates in `backend/app/web/templates/` and refresh.
 
 **Tests** (no Postgres needed — uses in-memory SQLite):
 
@@ -70,7 +63,7 @@ The import pipeline reads a KubeJS debug export folder and populates the databas
 
 ```bash
 cd backend
-python -m app.importer \
+DEBUG=false uv run python -m app.importer \
   --export-dir ../allthemons_export \
   --game minecraft \
   --game-version 1.21.1 \
@@ -89,37 +82,28 @@ The import is idempotent — running it again on the same export is safe.
 ├── docker-compose.yml
 ├── backend/
 │   ├── app/
-│   │   ├── api/v1/routes/   # auth, users, admin, catalog, chains, recipes
+│   │   ├── api/v1/routes/   # JSON API: auth, users, admin, catalog, chains, discover, recipes
+│   │   ├── web/             # server-rendered site: routes, Jinja2 templates, static css/js
+│   │   ├── discovery/       # scope (game+pack+version), in-memory index, shared queries
 │   │   ├── auth/            # JWT, Argon2 passwords, OAuth (GitHub/Google/Authentik)
-│   │   ├── models/          # SQLModel ORM + Pydantic schemas (20 tables)
+│   │   ├── models/          # SQLModel ORM + Pydantic schemas
 │   │   └── importer/        # KubeJS export ingestion
 │   ├── alembic/             # database migrations
 │   └── tests/
-└── frontend/
-    └── src/
-        ├── lib/             # api.ts, auth.ts, types.ts, UI components
-        └── routes/          # login, register, profile, admin/*, oauth callback
+└── docs/
 ```
 
 ---
 
 ## Tech Stack
 
-**Backend**
 | | |
 |---|---|
 | Framework | FastAPI + SQLModel (SQLAlchemy 2 + Pydantic 2) |
+| Website | Jinja2 templates + HTMX 2 (vendored), hand-written CSS — no Node, no build step |
 | Database | PostgreSQL 18 via asyncpg; SQLite for tests |
-| Auth | PyJWT (HS256), pwdlib Argon2, authlib OAuth |
+| Auth | Cookie session (DB-backed, revocable) for the site; Bearer JWT for the JSON API; Argon2; OAuth via authlib |
 | Migrations | Alembic (async) |
-
-**Frontend**
-| | |
-|---|---|
-| Framework | SvelteKit 2 (Svelte 5, CSR-only) |
-| Styling | Tailwind CSS v4 + shadcn-svelte (bits-ui) |
-| Language | TypeScript 6 |
-| Served by | nginx (SPA fallback + /api proxy) |
 
 ---
 
@@ -132,7 +116,7 @@ Copy `backend/.env.example` to `backend/.env`. Required variables:
 | `DATABASE_URL` | `postgresql+asyncpg://user:pass@host/db` |
 | `DATABASE_URL_SYNC` | `postgresql+psycopg2://user:pass@host/db` (Alembic only) |
 | `JWT_SECRET` | Random hex string (`python -c "import secrets; print(secrets.token_hex(32))"`) |
-| `DEBUG` | Set `true` in development (enables /docs, HTTP cookies) |
+| `DEBUG` | `true` in development (enables /docs, allows HTTP cookies and the placeholder secret). The app refuses to start with `DEBUG=false` and a default `JWT_SECRET`. |
 
 OAuth providers (all optional — leave blank to disable):
 
@@ -142,7 +126,7 @@ OAuth providers (all optional — leave blank to disable):
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth app |
 | `AUTHENTIK_CLIENT_ID` / `AUTHENTIK_CLIENT_SECRET` / `AUTHENTIK_BASE_URL` | Authentik |
 
-OAuth callback URL to register: `http://<your-domain>/api/v1/auth/oauth/<provider>/callback`
+OAuth callback URL to register: `https://<your-domain>/api/v1/auth/oauth/<provider>/callback`. Sign-in starts at `/auth/oauth/<provider>`; a `state` nonce cookie is verified on return.
 
 ---
 
@@ -177,7 +161,7 @@ asyncio.run(main())
 EOF
 ```
 
-Log out and log back in — the refreshed JWT will include `superuser: true` and the Admin link will appear in the navbar.
+Reload — the site reads roles from the database on every request, so no re-login is needed. The Admin page lists the modpacks and mods you manage (everything, for superusers).
 
 ---
 

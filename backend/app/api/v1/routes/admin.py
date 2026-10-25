@@ -269,7 +269,8 @@ async def _transition_modpack(
     if not mp:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ModPack not found")
 
-    await _require_scope_admin(session, token, AdminScopeType.MODPACK, modpack_id)
+    # Memberships are granted on the modpack identity (see the members endpoints), not on one version
+    await _require_scope_admin(session, token, AdminScopeType.MODPACK, mp.identity_id)
 
     if mp.status not in allowed_from:
         raise HTTPException(

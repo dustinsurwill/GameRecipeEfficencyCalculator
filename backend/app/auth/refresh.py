@@ -25,7 +25,7 @@ class RefreshToken(SQLModel, table=True):
     user_id: uuid.UUID = Field(index=True, foreign_key="users.id")
     expires_at: datetime
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
     # Optional: track where this session came from
     user_agent: str | None = Field(default=None, max_length=256)
@@ -41,9 +41,11 @@ async def store_refresh_token(
     user_agent: str | None = None,
     ip_address: str | None = None,
 ) -> RefreshToken:
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    # Stored as naive UTC: the column is TIMESTAMP WITHOUT TIME ZONE, which asyncpg won't
+    # accept an aware datetime for. Readers re-attach tzinfo=UTC before comparing.
+    expires_at = (datetime.now(timezone.utc) + timedelta(
         days=settings.jwt_refresh_token_expire_days
-    )
+    )).replace(tzinfo=None)
     token = RefreshToken(
         jti=jti,
         user_id=user_id,
@@ -58,7 +60,7 @@ async def store_refresh_token(
 
 async def get_refresh_token(session: AsyncSession, jti: str) -> RefreshToken | None:
     result = await session.exec(select(RefreshToken).where(RefreshToken.jti == jti))
-    return result.first()
+    return result.scalars().first()
 
 
 async def revoke_refresh_token(session: AsyncSession, jti: str) -> None:

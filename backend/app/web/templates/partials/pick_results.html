@@ -1,0 +1,8 @@
+{% import "macros.html" as m %}
+{% for i in items %}
+<button type="button" class="sr-row" role="option" aria-selected="false" hx-boost="false"
+        hx-get="{{ scope.url('/_picked') }}{{ qs(which=which, id=i.item_id) }}" hx-target="#picker-{{ which }}" hx-swap="outerHTML">
+  {{ m.tile(i.name, i.namespace, 30) }}
+  <span class="grow"><span class="bold small trunc">{{ i.name }}</span><span class="muted xs trunc">{{ i.mod_name }}</span></span>
+</button>
+{% endfor %}

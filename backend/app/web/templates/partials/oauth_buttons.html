@@ -1,0 +1,6 @@
+{% if providers %}
+<div class="stack" style="gap:.5rem;border-top:1px solid var(--border);padding-top:1rem">
+  <p class="muted xs">Or continue with</p>
+  {% for p in providers %}<a class="btn" href="/auth/oauth/{{ p.id }}" hx-boost="false">{{ p.name }}</a>{% endfor %}
+</div>
+{% endif %}

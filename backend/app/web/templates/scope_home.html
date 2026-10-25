@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block description %}Items, recipes and machines in {{ scope.pack_name }} {{ scope.version }} ({{ scope.game_name }} {{ scope.game_version }}).{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ scope.url() }}">{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <section class="stack">
+    <p class="eyebrow">{{ scope.pack_name }} {{ scope.version }} · {{ scope.game_name }} {{ scope.game_version }}</p>
+    <h1 class="hero">Look up any item.<br><span class="muted">See how it’s made and what it’s for.</span></h1>
+    <div style="max-width:42rem">
+      {% set large = true %}{% set autofocus = true %}{% set placeholder = 'Try “piston”, “osmium”, “ME controller”…' %}
+      {% include "partials/search_box.html" %}
+    </div>
+    <p class="muted small row">
+      <span class="hide-sm">Press <kbd>/</kbd> to search from anywhere.</span>
+      {% if not scope.is_latest %}<span class="badge warn">Not the latest version</span>{% endif %}
+    </p>
+  </section>
+
+  <section class="stats" aria-label="Pack contents">
+    <a href="{{ scope.url('/items') }}"><b>{{ counts['items']|num }}</b><span class="muted small">Items</span></a>
+    <a href="{{ scope.url('/machines') }}"><b>{{ counts.recipes|num }}</b><span class="muted small">Recipes</span></a>
+    <a href="{{ scope.url('/mods') }}"><b>{{ counts.mods|num }}</b><span class="muted small">Mods</span></a>
+    <a href="{{ scope.url('/machines') }}"><b>{{ counts.machines|num }}</b><span class="muted small">Machines</span></a>
+  </section>
+
+  <section class="stack">
+    <div class="row between"><h2 class="h2">Well-connected items</h2><a class="muted small" href="{{ scope.url('/items?sort=used_in') }}">Browse all items →</a></div>
+    <div class="grid cols-3">{% for it in popular_items %}{{ m.item_card(it, scope) }}{% endfor %}</div>
+  </section>
+
+  <div class="two-col">
+    <section class="stack">
+      <div class="row between"><h2 class="h2">Mods with the most recipes</h2><a class="muted small" href="{{ scope.url('/mods') }}">All mods →</a></div>
+      <ul class="list">{% for x in top_mods %}<li><a href="{{ scope.url('/mods/' ~ x.namespace) }}"><span class="bold">{{ x.name }}</span><span class="muted num">{{ x.recipe_count|num }} recipes</span></a></li>{% endfor %}</ul>
+    </section>
+    <section class="stack">
+      <div class="row between"><h2 class="h2">Busiest machines</h2><a class="muted small" href="{{ scope.url('/machines') }}">All machines →</a></div>
+      <ul class="list">{% for x in top_machines %}<li><a href="{{ scope.url('/machines/' ~ x.id) }}"><span><span class="bold">{{ x.name }}</span> <span class="muted">· {{ x.mod_name }}</span></span><span class="muted num">{{ x.recipe_count|num }}</span></a></li>{% endfor %}</ul>
+    </section>
+  </div>
+
+  <section class="card pad row between">
+    <div><h2 class="bold">Planning a production line?</h2><p class="muted small">Find every multi-step route from one item to another, ranked by yield.</p></div>
+    <a class="btn primary-btn" href="{{ scope.url('/routes') }}">Open route finder</a>
+  </section>
+</div>
+{% endblock %}

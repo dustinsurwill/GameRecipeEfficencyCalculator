@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Admin — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <h1 class="h1">Admin</h1>
+  {% include "admin/_flash.html" %}
+  {% if can_review %}
+  <section class="card pad row between">
+    <div><h2 class="bold">Recipe queue</h2><p class="muted small">Review community recipe submissions.</p></div>
+    <a class="btn" href="/admin/recipes">Open queue</a>
+  </section>
+  {% endif %}
+  <section class="stack"><h2 class="h2">Modpacks</h2>
+    <ul class="list">{% for p in packs %}<li><a href="/admin/modpacks/{{ p.id }}"><span class="bold">{{ p.name }}</span><span class="muted mono small">{{ p.slug }}</span></a></li>
+    {% else %}<li class="li muted small">You don’t manage any modpacks.</li>{% endfor %}</ul>
+  </section>
+  <section class="stack"><h2 class="h2">Mods</h2>
+    <ul class="list">{% for x in mods %}<li><a href="/admin/mods/{{ x.id }}"><span class="bold">{{ x.name }}</span><span class="muted mono small">{{ x.namespace }}</span></a></li>
+    {% else %}<li class="li muted small">You don’t manage any mods.</li>{% endfor %}</ul>
+  </section>
+</div>
+{% endblock %}

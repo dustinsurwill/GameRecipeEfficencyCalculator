@@ -1,0 +1,81 @@
+{# Shared building blocks. Import with: {% import "macros.html" as m %} #}
+
+{% macro tile(name, ns='', size=36, tag=False, fluid=False) -%}
+<span class="tile{{ ' tag' if tag }}{{ ' fluid' if fluid }}" style="--s:{{ size }}px;--h:{{ hue(ns) }}" aria-hidden="true">{{ '≈' if fluid else initials(name, tag) }}</span>
+{%- endmacro %}
+
+{% macro item_card(it, scope, show_mod=True) %}
+<a class="item-card" href="{{ scope.url('/items/' ~ (it.item_id|urlq)) }}">
+  {{ tile(it.name, it.namespace, 40) }}
+  <span class="t grow">
+    <span class="name trunc">{{ it.name }}</span>
+    {% if show_mod %}<span class="muted xs trunc" style="display:block">{{ it.mod_name }}</span>{% endif %}
+    <span class="muted xs num trunc" style="display:block">
+      {% if it.made_by %}{{ it.made_by|num }} recipe{{ '' if it.made_by == 1 else 's' }}{% else %}no recipe{% endif %}
+      · {{ it.used_in|num }} use{{ '' if it.used_in == 1 else 's' }}
+    </span>
+  </span>
+</a>
+{% endmacro %}
+
+{% macro slot_chip(s, scope, highlight=None) %}
+{%- set label = s.name if (s.item_id or s.is_fluid) else (s.tag|tag_label) -%}
+{%- set ns = (s.item_id or s.tag or s.fluid_label or '').split(':')[0] -%}
+{%- set hit = highlight and (s.item_id == highlight or s.via_tag) -%}
+{%- if s.item_id -%}{%- set href = scope.url('/items/' ~ (s.item_id|urlq)) -%}
+{%- elif s.tag -%}{%- set href = scope.url('/tag?id=' ~ (s.tag|urlq)) -%}
+{%- else -%}{%- set href = None -%}{%- endif -%}
+<{{ 'a' if href else 'span' }} class="chip{{ ' hit' if hit }}" {% if href %}href="{{ href }}"{% endif %} title="{{ s.item_id or ('Tag: #' ~ s.tag if s.tag else s.fluid_label or '') }}">
+  {{ tile(label, ns, 32, tag=(not s.item_id and s.tag), fluid=s.is_fluid) }}
+  <span style="min-width:0">
+    <span class="lbl">
+      {%- if s.quantity != 1 %}<span class="qty">{{ s.quantity|qty }}×</span>{% endif -%}
+      {%- if not s.item_id and s.tag %}<span class="muted" style="margin-right:.25rem">Any</span>{% endif -%}
+      {{ label }}
+    </span>
+    {% if s.via_tag and s.tag %}<span class="sub trunc">via #{{ s.tag }}</span>
+    {% elif s.is_fluid and s.quantity > 0 and not s.item_id %}<span class="sub">fluid / chemical</span>{% endif %}
+  </span>
+</{{ 'a' if href else 'span' }}>
+{% endmacro %}
+
+{% macro recipe_card(r, scope, highlight=None) %}
+<article class="recipe">
+  <header class="recipe-h">
+    <a class="m" href="{{ scope.url('/machines/' ~ r.machine.id) }}">{{ r.machine.name }}</a>
+    <a class="mono" href="{{ scope.url('/mods/' ~ r.namespace) }}">{{ r.namespace }}</a>
+    {% if r.time_ticks %}<span>{{ r.time_ticks|ticks }}</span>{% endif %}
+    {% if r.energy_rf %}<span>{{ r.energy_rf|num }} RF</span>{% endif %}
+    {% if r.modpack_override %}<span class="badge">Modpack recipe</span>{% endif %}
+  </header>
+  <div class="recipe-b">
+    <div class="slots">{% for s in r.inputs + r.aux_inputs %}{{ slot_chip(s, scope, highlight) }}{% endfor %}</div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="slots">{% for s in r.outputs %}{{ slot_chip(s, scope, highlight) }}{% endfor %}</div>
+  </div>
+</article>
+{% endmacro %}
+
+{# Recipe cards plus the "show more" button; the button swaps itself for the next page. #}
+{% macro recipe_list(recipes, scope, highlight, next_offset, left, total, shown, rec_params, empty='No recipes found.') %}
+{% for r in recipes %}{{ recipe_card(r, scope, highlight) }}{% endfor %}
+{% if not recipes and next_offset is none and shown == 0 %}<p class="empty">{{ empty }}</p>{% endif %}
+{% if next_offset is not none %}
+<div class="row" style="justify-content:center;padding-top:.5rem">
+  <button class="btn" type="button"
+          hx-get="{{ scope.url('/_recipes') }}{{ qs(item=rec_params.item, role=rec_params.role, machine=rec_params.machine, mod=rec_params.mod, offset=next_offset) }}"
+          hx-target="closest .row" hx-swap="outerHTML" hx-boost="false">Show {{ left }} more</button>
+  <span class="muted xs num">{{ shown|num }} of {{ total|num }}</span>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro pager(page, pages, base) %}
+{% if pages > 1 %}
+<nav class="pager" aria-label="Pagination">
+  <a class="btn" {% if page > 1 %}href="{{ base }}{{ '&' if '?' in base else '?' }}page={{ page - 1 }}"{% else %}aria-disabled="true"{% endif %}>← Previous</a>
+  <span class="muted num">Page {{ page }} of {{ pages }}</span>
+  <a class="btn" {% if page < pages %}href="{{ base }}{{ '&' if '?' in base else '?' }}page={{ page + 1 }}"{% else %}aria-disabled="true"{% endif %}>Next →</a>
+</nav>
+{% endif %}
+{% endmacro %}

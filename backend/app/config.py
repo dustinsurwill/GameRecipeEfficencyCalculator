@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # ── App ───────────────────────────────────────────────────────────────────
     app_name: str = "RecipeBook"
     debug: bool = False
-    frontend_url: str = "http://localhost:5173"  # SvelteKit dev server
+    frontend_url: str = ""  # only set if a separate origin (e.g. a mobile app) calls the JSON API
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://recipebook:recipebook@localhost/recipebook"

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{{ mod.name }} — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block wrap_class %}wide{% endblock %}
+{% block content %}
+<div class="stack">
+  <header class="stack" style="gap:.25rem">
+    <h1 class="h1">{{ mod.name }}</h1>
+    <p class="muted mono small">{{ mod.namespace }}</p>
+    {% if mod.description %}<p style="max-width:40rem">{{ mod.description }}</p>{% endif %}
+  </header>
+  {% set base = scope.url('/mods/' ~ mod.namespace) %}
+  <div class="tabs" role="tablist">
+    {% for key, label, n in [('items', 'Items', mod.item_count), ('machines', 'Machines', mod.machines|length), ('recipes', 'Recipes', mod.recipe_count)] %}
+    <a class="tab" role="tab" aria-selected="{{ 'true' if tab == key else 'false' }}" href="{{ base }}{{ qs(tab=key) }}">{{ label }}<span class="n">{{ n|num }}</span></a>
+    {% endfor %}
+  </div>
+  {% if tab == 'items' %}
+    <form method="get" action="{{ base }}" hx-get="{{ base }}" hx-trigger="input delay:220ms" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" style="max-width:24rem">
+      <input type="hidden" name="tab" value="items">
+      <input name="q" value="{{ q }}" placeholder="Filter this mod’s items…" aria-label="Filter items" autocomplete="off">
+    </form>
+    <div id="results" class="stack">
+      {% if items %}<div class="grid cols-3">{% for it in items %}{{ m.item_card(it, scope, show_mod=False) }}{% endfor %}</div>
+      {{ m.pager(page, pages, base ~ qs(tab='items', q=q)) }}
+      {% else %}<p class="empty">No items match.</p>{% endif %}
+    </div>
+  {% elif tab == 'machines' %}
+    {% if mod.machines %}
+    <ul class="grid cols-2">{% for x in mod.machines %}<li><a class="card pad row between" href="{{ scope.url('/machines/' ~ x.id) }}"><span class="bold">{{ x.name }}</span><span class="muted small num">{{ x.recipe_count|num }} recipes</span></a></li>{% endfor %}</ul>
+    {% else %}<p class="empty">This mod doesn’t add any crafting stations to the pack.</p>{% endif %}
+  {% else %}
+    <div class="recipes">{{ m.recipe_list(recipes, scope, None, next_offset, left, total, shown, rec_params) }}</div>
+  {% endif %}
+</div>
+{% endblock %}

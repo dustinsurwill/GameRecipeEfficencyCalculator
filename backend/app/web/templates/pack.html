@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ scope.pack_name }} — versions — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack">
+  <p class="muted small"><a href="/" class="u">All games</a> / <a href="/{{ scope.game_slug }}" class="u">{{ scope.game_name }}</a></p>
+  <h1 class="h1">{{ scope.pack_name }}</h1>
+  <p class="muted">Each version has its own items and recipes. Pick the one you play.</p>
+  <ul class="list">
+    {% for v in versions %}
+    <li><a href="/{{ scope.game_slug }}/{{ scope.pack_slug }}/{{ v.version }}">
+      <span><span class="bold">{{ v.version }}</span>
+        {% if loop.first %}<span class="badge" style="margin-left:.5rem">Latest</span>{% endif %}
+        {% if v.status != 'published' %}<span class="badge warn" style="margin-left:.5rem">{{ v.status }}</span>{% endif %}</span>
+      <span class="muted small">Released {{ v.created_at.strftime('%Y-%m-%d') }}</span>
+    </a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

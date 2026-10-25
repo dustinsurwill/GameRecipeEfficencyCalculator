@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Route finder — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% macro slotline(s) -%}
+  {%- set label = s.canonical_name or (s.item_id.split(':')[1].replace('_', ' ')|title if s.item_id else (('Any ' ~ (s.tag|tag_label)) if s.tag else 'Fluid / chemical')) -%}
+  <div class="slotline">
+    {{ m.tile(label, (s.item_id or s.tag or '').split(':')[0], 24, tag=(not s.item_id and s.tag)) }}
+    <span class="qty">{{ s.quantity|qty }}×</span>
+    {% if s.item_id and not s.is_fluid %}<a class="u" href="{{ scope.url('/items/' ~ (s.item_id|urlq)) }}">{{ label }}</a>{% else %}<span>{{ label }}</span>{% endif %}
+  </div>
+{%- endmacro %}
+{% block content %}
+<div class="stack" style="max-width:56rem">
+  <header class="stack" style="gap:.25rem">
+    <h1 class="h1">Route finder</h1>
+    <p class="muted small" style="max-width:40rem">Pick the item you want. Add a starting item to see every way to turn one into the other, ranked by how much you get per input. Leave it empty to trace the target back to raw materials.</p>
+  </header>
+
+  <form class="card pad stack" method="get" action="{{ scope.url('/routes') }}" id="route-form" hx-indicator="#busy">
+    <input type="hidden" name="ran" value="1">
+    <div class="grid cols-2">
+      <div class="field"><span>Start with <span class="field-hint">· optional</span></span>{% with which='start', item=start %}{% include "partials/picker.html" %}{% endwith %}</div>
+      <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
+    </div>
+    <div class="row">
+      <label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>
+      <label class="row small">Max steps
+        <select name="depth">{% for n in [3, 4, 5, 6, 8, 10] %}<option value="{{ n }}" {{ 'selected' if n == depth }}>{{ n }}</option>{% endfor %}</select></label>
+      <span id="busy" class="htmx-indicator muted small">Searching…</span>
+      <button class="btn primary-btn" style="margin-left:auto" type="submit">Find routes</button>
+    </div>
+  </form>
+
+  {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+
+  {% if result %}
+    {% if result.total_found == 0 %}
+      <p class="empty">{{ result.note or 'No routes found. Try more steps, or allow crafting-table recipes.' }}</p>
+    {% else %}
+      <p class="muted small">
+        {{ result.total_found|num }} route{{ '' if result.total_found == 1 else 's' }} found, showing the best {{ result.returned }}.
+        {% if result.truncated %}<span class="primary">The search stopped early because this item has a very large number of routes — lower the step limit or ignore crafting recipes to narrow it.</span>{% endif %}
+      </p>
+      {% for chain in result.chains %}
+      <article class="card">
+        <header class="row between" style="padding:.75rem 1rem">
+          <h2 class="bold">Route {{ chain.rank }} <span class="muted" style="font-weight:400">· {{ chain.steps|length }} step{{ '' if chain.steps|length == 1 else 's' }}</span>
+            {% if chain.has_cycle %}<span class="primary xs" style="margin-left:.5rem">loops back</span>{% endif %}</h2>
+          <span class="small num">
+            {% if chain.yield_per_start_item is not none %}<b>{{ '%.2f'|format(chain.yield_per_start_item) }}</b> per input
+            {% elif chain.raw_materials_per_target is not none %}<b>{{ '%.2f'|format(chain.raw_materials_per_target) }}</b> raw per item{% endif %}
+          </span>
+        </header>
+        {% for step in chain.steps %}
+        <div class="route-step">
+          <div class="small"><span class="muted num">{{ step.step }}.</span> <a class="bold u" href="{{ scope.url('/machines/' ~ step.machine.id) }}">{{ step.machine.name }}</a></div>
+          <div>{% for s in step.inputs + step.aux_inputs %}{{ slotline(s) }}{% endfor %}</div>
+          <div>{% for s in step.outputs %}{{ slotline(s) }}{% endfor %}</div>
+        </div>
+        {% endfor %}
+      </article>
+      {% endfor %}
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Sign up — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+<form class="card pad stack" method="post" action="/register" hx-boost="false">
+  <h1 class="h1">Create an account</h1>
+  {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+  <label class="field"><span>Display name</span><input name="display_name" value="{{ (form or {}).get('display_name', '') }}" required minlength="2" maxlength="64" autocomplete="nickname" autofocus></label>
+  <label class="field"><span>Email</span><input type="email" name="email" value="{{ (form or {}).get('email', '') }}" required autocomplete="email"></label>
+  <label class="field"><span>Password <span class="field-hint">· at least 8 characters</span></span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+  <button class="btn primary-btn" type="submit">Sign up</button>
+  {% include "partials/oauth_buttons.html" %}
+  <p class="muted small">Already registered? <a class="u primary" href="/login">Log in</a></p>
+</form>
+{% endblock %}
