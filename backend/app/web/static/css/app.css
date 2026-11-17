@@ -100,7 +100,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .nav-search + .nav-end { margin-left: 0; }
 .scope-pill { font-size: 0.75rem; color: var(--muted-fg); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.6rem; white-space: nowrap; }
 .scope-pill:hover { color: var(--foreground); border-color: var(--primary); }
-@media (max-width: 767px) { .brand-text, .nav-search, .scope-pill { display: none; } }
+@media (max-width: 767px) {
+  .brand-text, .nav-search, .scope-pill { display: none; }
+  /* the links drop to their own row, so the nav is never wider than the screen (it used to be, and the page then panned sideways) */
+  .nav-in { flex-wrap: wrap; gap: 0.35rem 0.75rem; }
+  .nav-links { order: 3; flex: 1 0 100%; overflow-x: auto; white-space: nowrap; gap: 1.1rem; padding-bottom: 0.15rem; }
+  .nav-end { gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+}
 
 /* ── Controls ───────────────────────────────────────────────────────────── */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: 1px solid var(--border); background: var(--secondary); border-radius: var(--radius); padding: 0.45rem 0.9rem; font-size: 0.9rem; font-weight: 500; line-height: 1.3; }

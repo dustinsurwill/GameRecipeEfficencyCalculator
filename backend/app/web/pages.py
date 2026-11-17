@@ -377,6 +377,7 @@ async def factory_page(
     request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx, session: AsyncSession = Depends(get_session),
     target: str = "", rate: float = Query(60, ge=0, le=1_000_000_000), per: str = "min", module: str = "",
     beacons: int = Query(0, ge=0, le=12), bmodule: str = "", bshare: float = Query(1, gt=0, le=64), belt: str = "",
+    balance: str = "", ran: str = "",
     u: list[str] = Query([]), t: list[str] = Query([]),
 ):
     """The whole factory for N of an item per minute (or second): recipe tree, machines, power, raw resources."""
@@ -402,7 +403,8 @@ async def factory_page(
     })
     belts = constants["belts"]
     belt_speed = next((b["items_per_s"] for b in belts if b["name"] == belt), None)
-    if belt == "" and belts and request.query_params.get("ran") != "1":
+    use_balance = balance == "1" or ran != "1"
+    if belt == "" and belts and ran != "1":
         belt, belt_speed = belts[-1]["name"], belts[-1]["items_per_s"]          # first visit: the fastest belt
 
     overrides: dict[str, uuid.UUID] = {}
@@ -422,7 +424,7 @@ async def factory_page(
             factory.Settings(
                 overrides=overrides, tier_pref=tier_pref, module=module or None, modules=modules,
                 beacons=beacons if bmodule and beacon else 0, beacon_module=bmodule or None, beacon_share=bshare,
-                beacon=beacon, belt=belt_speed,
+                beacon=beacon, belt=belt_speed, balance=balance == "1" or ran != "1",
             ),
         )
 
@@ -430,7 +432,7 @@ async def factory_page(
             pairs = [("target", target), ("rate", f"{rate:g}"), ("per", per)]
             pairs += [("module", module)] if module else []
             pairs += [("beacons", str(beacons)), ("bmodule", bmodule), ("bshare", f"{bshare:g}")] if beacons and bmodule else []
-            pairs += [("ran", "1"), ("belt", belt)]
+            pairs += [("ran", "1"), ("belt", belt)] + ([("balance", "1")] if use_balance else [])
             pairs += [("t", e) for e in t] + [("u", f"{i}@{rid}") for i, rid in new_overrides.items()]
             return scope.url("/factory") + "?" + urlencode(pairs)
 
@@ -444,7 +446,7 @@ async def factory_page(
         request, "factory.html", scope=scope, target=sel_target, rate=rate, per=per, module=module, result=result,
         k=60 if per == "min" else 1, unit="min" if per == "min" else "s", machine_options=machine_options,
         module_names=module_names, tier_pref=tier_pref, overrides=overrides,
-        beacons=beacons, bmodule=bmodule, bshare=bshare, beacon_modules=beacon_modules, has_beacon=bool(beacon),
+        balance=use_balance, beacons=beacons, bmodule=bmodule, bshare=bshare, beacon_modules=beacon_modules, has_beacon=bool(beacon),
         belts=belts, belt=belt, beacon=beacon,
         error="No recipe makes that item." if result and not result["found"] else None,
     )

@@ -141,7 +141,7 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    `/{game}/{pack}/{version}/factory` (throughput games only) solves the whole tree: cheapest recipe per item (recipes from
    a non-primary mod carry a big penalty, so base wins where it can; productivity counts, so electromagnetic plants win over assemblers for circuits), swap any item's recipe via "other ways", pick a machine
    tier per type, fill all slots with a module. Beacons (n per machine x module, `profile` diminishing returns, power from a machines-per-beacon figure) and
-   belt counts (`Game.constants_json`: belts + beacon, filtered to the pack's mods) are on the factory page; every item page of a throughput game has
+   belt counts (`Game.constants_json`: belts + beacon, filtered to the pack's mods) are on the factory page; leftover fluids are used up (`factory._pick_converters`: cracking recipes fed by a leftover fluid run just often enough to eat it; the solver repeats its demand pass to a fixed point so byproducts are credited); every item page of a throughput game has
    "Machine ratios" (`factory.ratios`: what one machine makes/eats and how many default-recipe feeder machines per input, e.g. 2 : 1). Rates may be decimals. Not covered: pollution, beacon-power sharing beyond a flat machines-per-beacon figure, fuel for
    burner machines (reported as kW), mining productivity, quality, boilers/spoilage, recycling recipes, fluid temperatures,
    planet `surface_conditions`, resource yield %. Minecraft's upgrade items (speed/energy modules of mods) still have no

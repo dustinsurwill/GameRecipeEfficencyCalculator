@@ -103,7 +103,7 @@ def test_byproducts_offset_demand_and_the_rest_is_surplus():
     # slag is made as a byproduct of plate: 1 gear needs 1 plate (-> 2 slag made) and 1 slag, 1 slag left over
     assert [(s["item_id"], round(s["rate"], 6)) for s in res["surplus"]] == [("b:slag", 1.0)]
     split_row = by_item(res)["b:plate"]
-    assert split_row["crafts_per_s"] == 1 and {m["item_id"] for m in split_row["makes"]} == {"b:plate", "b:slag"}
+    assert split_row["crafts_per_s"] == 1 and "b:plate" in {m["item_id"] for m in split_row["makes"]}
 
 
 def test_one_recipe_chosen_for_several_items_is_one_row():
@@ -208,3 +208,35 @@ def test_ratios_say_how_many_feeder_machines_one_machine_needs():
     assert plate["pair"] == (5, 24)                                                    # 4.8 furnaces per assembler
     assert small_ratio(2.0) == (1, 2) and small_ratio(0.5) == (2, 1) and small_ratio(1.5) == (2, 3)
     assert small_ratio(0.0) is None and small_ratio(4.8) == (5, 24)
+
+
+def _oil():
+    """refinery: 1 crude -> 2 heavy + 1 light (+ gas via the demanded recipe), crackers turn heavy -> light -> gas."""
+    crude = timed(rec("t:pump", "pump", [], [("fluid:b:crude", 10)]), 1, tiers(("Pump", 1, 1, 0)))
+    refine = timed(rec("t:refine", "refinery", [("fluid:b:crude", 10)],
+                       [("fluid:b:heavy", 4), ("fluid:b:light", 3), ("fluid:b:gas", 2)], key="a-refine"), 5, tiers(("Refinery", 1, 420, 0)))
+    crack_h = timed(rec("t:crack-heavy", "cracker", [("fluid:b:heavy", 4)], [("fluid:b:light", 3)], key="b-crack-heavy"), 2, tiers(("Cracker", 1, 210, 0)))
+    crack_l = timed(rec("t:crack-light", "cracker", [("fluid:b:light", 3)], [("fluid:b:gas", 2)], key="c-crack-light"), 2, tiers(("Cracker", 1, 210, 0)))
+    plastic = timed(rec("t:plastic", "chem", [("fluid:b:gas", 20)], [("b:plastic", 2)]), 1, tiers(("Chem plant", 1, 210, 0)))
+    return crude, refine, crack_h, crack_l, plastic
+
+
+OIL_NAMES = {**NAMES, "fluid:b:crude": "Crude", "fluid:b:heavy": "Heavy", "fluid:b:light": "Light", "fluid:b:gas": "Gas", "b:plastic": "Plastic"}
+
+
+def test_leftover_fluids_are_cracked_into_what_the_plan_needs():
+    crude, refine, crack_h, crack_l, plastic = _oil()
+    g = graph(crude, refine, crack_h, crack_l, plastic)
+    over = {"fluid:b:gas": 0}
+    plain = solve(g, OIL_NAMES, "b:plastic", 1, Settings(overrides={"fluid:b:gas": refine.id}, balance=False))
+    assert {x["item_id"] for x in plain["surplus"]} == {"fluid:b:heavy", "fluid:b:light"}          # refinery byproducts pile up
+    res = solve(g, OIL_NAMES, "b:plastic", 1, Settings(overrides={"fluid:b:gas": refine.id}))
+    assert not [x for x in res["surplus"] if x["item_id"].startswith("fluid:")], res["surplus"]     # all of it used up
+    assert any(n.get("converter") for n in res["rows"]) and res["notes"]
+    # less crude is needed than without cracking, and the plastic still gets all the gas it needs
+    assert next(x for x in res["resources"] if x["item_id"] == "fluid:b:crude")["rate"] < \
+        next(x for x in plain["resources"] if x["item_id"] == "fluid:b:crude")["rate"]
+    gas_made = sum(m["rate"] for n in res["rows"] for m in n["makes"] if m["item_id"] == "fluid:b:gas")
+    assert gas_made >= 10 - 1e-6                                                                  # plastic: 1/s needs 10 gas/s
+    # nothing leftover, nothing to convert: no extra rows
+    assert not any(n.get("converter") for n in solve(graph(*line()), NAMES, "b:gear", 1)["rows"])

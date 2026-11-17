@@ -88,7 +88,17 @@ def fmt_power(kw) -> str:
 templates.env.filters.update(
     power=fmt_power, ns_of=ns_of, num=fmt_num, qty=fmt_qty, tag_label=tag_label, ticks=fmt_ticks, urlq=q,
 )
-templates.env.globals.update(hue=hue, initials=initials, qs=qs, urlq=q)
+
+
+def _asset_version(*names: str) -> str:
+    """Newest modification time of the static files, so a changed stylesheet is not served from a browser's cache."""
+    try:
+        return str(int(max((BASE / "static" / n).stat().st_mtime for n in names)))
+    except OSError:
+        return "0"
+
+
+templates.env.globals.update(hue=hue, initials=initials, qs=qs, urlq=q, asset_v=_asset_version("css/app.css", "js/app.js"))
 
 
 def render(request: Request, name: str, status_code: int = 200, **ctx):

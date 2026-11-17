@@ -45,6 +45,7 @@ class Settings:
     beacon_share: float = 1.0                                           # machines each beacon serves (for the beacon count)
     beacon: dict | None = None                                          # the game's beacon: module_slots, effectivity, profile, ...
     belt: float | None = None                                           # items per second one belt carries
+    balance: bool = True                                                # use up leftover fluids (cracking) where it helps
 
 
 def recipe_label(r: _Recipe) -> str:
@@ -179,12 +180,34 @@ def module_bonus(r: _Recipe, tier: dict, settings: Settings) -> tuple[float, flo
             slots * e.get("consumption", 0.0) + b_cons, slots, mod.name)
 
 
-def solve(
-    graph: _RecipeGraph, names: dict[str, str], target: str, rate: float, settings: Settings | None = None,
+_FLUID = ("fluid:", "chemical:")
+
+Converter = tuple[_Recipe, str]       # a recipe that runs on a leftover fluid, and which input it is fed from
+
+
+def _is_fluid(item: str | None) -> bool:
+    return bool(item) and str(item).startswith(_FLUID)
+
+
+def _fluid_surplus(result: dict) -> float:
+    return sum(x["rate"] for x in result["surplus"] if _is_fluid(x["item_id"]))
+
+
+def _new_node(r: _Recipe, tier: dict | None, prod_b: float, speed_b: float, cons_b: float,
+              n_modules: int, module_name: str | None) -> dict:
+    base = min(float(tier.get("base_productivity") or 0), prod_b) if tier and r.allow_productivity else 0.0
+    return {
+        "recipe_id": str(r.id), "recipe": recipe_label(r), "machine": r.machine.name, "seconds": r.time_ticks / 60,
+        "crafts_per_s": 0.0, "depth": 0, "makes": [], "inputs": {}, "tier": None, "machines": None,
+        "machines_exact": None, "power_kw": 0.0, "fuel": False, "modules": n_modules, "module_name": module_name,
+        "productivity": prod_b, "base_productivity": base, "_r": r, "_tier": tier, "_speed": speed_b, "_cons": cons_b,
+    }
+
+
+def _solve(
+    graph: _RecipeGraph, names: dict[str, str], target: str, rate: float, settings: Settings,
+    default: dict[str, _Recipe], converters: list[Converter],
 ) -> dict:
-    """`rate` is items per second. Returns rows (target first), totals, raw resources, surplus and warnings."""
-    settings = settings or Settings()
-    default = best_recipes(graph, settings.blocked, settings)
     warnings: list[str] = []
 
     def choose(item: str) -> _Recipe | None:
@@ -218,58 +241,119 @@ def solve(
         state[item] = 1
         order.append(item)
 
+    for c, feed in converters:                    # what a converter needs besides its leftover feed is part of the plan
+        for s in _inputs(c):
+            if s.item_id and s.item_id != feed:
+                visit(s.item_id)
     visit(target)
 
     # 2. demand flows from the target down (parents before children = reversed post-order). One node per
     # recipe: a recipe chosen for several items (oil processing makes three) runs once, for all of them.
-    demand: dict[str, float] = {target: rate}
-    supply: dict[str, float] = {}               # byproducts made so far, credited against demand
-    produced: dict[str, float] = {}             # everything made, for the surplus
-    depth: dict[str, int] = {target: 0}
-    nodes: dict[uuid.UUID, dict] = {}
-    raw: list[dict] = []
+    # `carry` is what the previous pass saw other recipes make as a byproduct, `conv` how often the previous pass ran
+    # each converter. Parents are handled before children, so a byproduct of a recipe further down (heavy oil
+    # cracking's light oil, coal liquefaction's petroleum gas) can only be credited to demand that was already
+    # handled by repeating the pass.
+    def propagate(carry: dict[str, float], conv: dict[uuid.UUID, float]):
+        demand: dict[str, float] = {target: rate}
+        supply: dict[str, float] = {}               # byproducts made so far, credited against demand
+        produced: dict[str, float] = {}             # everything made, for the surplus
+        eaten: dict[str, float] = {}                # leftover fluid used up by converters
+        depth: dict[str, int] = {target: 0}
+        nodes: dict[uuid.UUID, dict] = {}
+        raw: list[dict] = []
+        runs: list[tuple[_Recipe, str, dict | None, float, float, float, float, int, str | None]] = []
 
-    for item in reversed(order):
-        r = chosen[item]
-        need = max(0.0, demand.get(item, 0.0) - supply.get(item, 0.0))
-        label = names.get(item, item.split(":")[-1].replace("-", " "))
-        if r is None:
-            if need > 1e-9:
-                raw.append({"item_id": item, "name": label, "rate": need, "machine": None, "machines": None})
-            continue
-        if need <= 1e-9:
-            continue                                         # fully covered by a byproduct of another recipe
-        out_qty = sum(o.quantity for o in r.outputs if o.item_id == item) or 1.0
-        tier = pick_tier(r, settings.tier_pref)
-        speed_b, prod_b, cons_b, n_modules, module_name = module_bonus(r, tier, settings) if tier else (0, 0, 0, 0, None)
-        crafts = need / (out_qty * (1 + prod_b))
-        node = nodes.get(r.id)
-        if node is None:
-            node = nodes[r.id] = {
-                "recipe_id": str(r.id), "recipe": recipe_label(r), "machine": r.machine.name, "seconds": r.time_ticks / 60,
-                "crafts_per_s": 0.0, "depth": 0, "makes": [], "inputs": {}, "tier": None, "machines": None,
-                "machines_exact": None, "power_kw": 0.0, "fuel": False, "modules": n_modules, "module_name": module_name,
-                "productivity": prod_b, "base_productivity": min(float(tier.get("base_productivity") or 0), prod_b) if tier and r.allow_productivity else 0.0, "_r": r, "_tier": tier, "_speed": speed_b, "_cons": cons_b,
-            }
-        node["crafts_per_s"] += crafts
-        node["depth"] = max(node["depth"], depth.get(item, 0))
-        node["makes"].append({"item_id": item, "name": label, "rate": need, "alternatives": [
-            {"id": str(alt.id), "machine": alt.machine.name, "recipe": recipe_label(alt),
-             "inputs": ", ".join(names.get(x.item_id or "", x.item_id or "?") for x in _inputs(alt)) or "nothing"}
-            for alt in _candidates(graph, item, settings.blocked) if alt.id != r.id]})
-        for o in r.outputs:                                  # byproducts offset later demand, the rest is surplus
-            if not o.item_id:
+        for c, feed in converters:                  # converters run on leftovers: their output is credited up front
+            n = conv.get(c.id, 0.0)
+            if n <= 1e-12:
                 continue
-            produced[o.item_id] = produced.get(o.item_id, 0.0) + crafts * o.quantity * (1 + prod_b)
-            if o.item_id != item:
-                supply[o.item_id] = supply.get(o.item_id, 0.0) + crafts * o.quantity * (1 + prod_b)
-        for s in _inputs(r):
-            if not s.item_id or (item, s.item_id) in broken:
+            tier = pick_tier(c, settings.tier_pref)
+            speed_b, prod_b, cons_b, n_mod, mod_name = module_bonus(c, tier, settings) if tier else (0, 0, 0, 0, None)
+            runs.append((c, feed, tier, n, prod_b, speed_b, cons_b, n_mod, mod_name))
+            for o in c.outputs:
+                if o.item_id:
+                    amount = n * o.quantity * (1 + prod_b)
+                    produced[o.item_id] = produced.get(o.item_id, 0.0) + amount
+                    supply[o.item_id] = supply.get(o.item_id, 0.0) + amount
+            for s in _inputs(c):
+                if not s.item_id:
+                    continue
+                if s.item_id == feed:
+                    eaten[feed] = eaten.get(feed, 0.0) + n * s.quantity
+                else:
+                    demand[s.item_id] = demand.get(s.item_id, 0.0) + n * s.quantity
+
+        for item in reversed(order):
+            r = chosen[item]
+            need = max(0.0, demand.get(item, 0.0) - max(supply.get(item, 0.0), carry.get(item, 0.0)))
+            label = names.get(item, item.split(":")[-1].replace("-", " "))
+            if r is None:
+                if need > 1e-9:
+                    raw.append({"item_id": item, "name": label, "rate": need, "machine": None, "machines": None})
                 continue
-            flow = crafts * s.quantity
-            demand[s.item_id] = demand.get(s.item_id, 0.0) + flow
-            depth[s.item_id] = max(depth.get(s.item_id, 0), depth.get(item, 0) + 1)
-            node["inputs"][s.item_id] = node["inputs"].get(s.item_id, 0.0) + flow
+            if need <= 1e-9:
+                continue                                         # fully covered by a byproduct of another recipe
+            out_qty = sum(o.quantity for o in r.outputs if o.item_id == item) or 1.0
+            tier = pick_tier(r, settings.tier_pref)
+            speed_b, prod_b, cons_b, n_modules, module_name = module_bonus(r, tier, settings) if tier else (0, 0, 0, 0, None)
+            crafts = need / (out_qty * (1 + prod_b))
+            node = nodes.get(r.id)
+            if node is None:
+                node = nodes[r.id] = _new_node(r, tier, prod_b, speed_b, cons_b, n_modules, module_name)
+            node["crafts_per_s"] += crafts
+            node["depth"] = max(node["depth"], depth.get(item, 0))
+            node["makes"].append({"item_id": item, "name": label, "rate": need, "alternatives": [
+                {"id": str(alt.id), "machine": alt.machine.name, "recipe": recipe_label(alt),
+                 "inputs": ", ".join(names.get(x.item_id or "", x.item_id or "?") for x in _inputs(alt)) or "nothing"}
+                for alt in _candidates(graph, item, settings.blocked) if alt.id != r.id]})
+            for o in r.outputs:                                  # byproducts offset later demand, the rest is surplus
+                if not o.item_id:
+                    continue
+                produced[o.item_id] = produced.get(o.item_id, 0.0) + crafts * o.quantity * (1 + prod_b)
+                if o.item_id != item:
+                    supply[o.item_id] = supply.get(o.item_id, 0.0) + crafts * o.quantity * (1 + prod_b)
+            for s in _inputs(r):
+                if not s.item_id or (item, s.item_id) in broken:
+                    continue
+                flow = crafts * s.quantity
+                demand[s.item_id] = demand.get(s.item_id, 0.0) + flow
+                depth[s.item_id] = max(depth.get(s.item_id, 0), depth.get(item, 0) + 1)
+                node["inputs"][s.item_id] = node["inputs"].get(s.item_id, 0.0) + flow
+
+        for c, feed, tier, n, prod_b, speed_b, cons_b, n_mod, mod_name in runs:     # the converters' own rows
+            node = nodes.get(c.id)
+            if node is None:
+                node = nodes[c.id] = _new_node(c, tier, prod_b, speed_b, cons_b, n_mod, mod_name)
+            node["crafts_per_s"] += n
+            node["converter"] = True
+            node["feed"] = feed
+            node["depth"] = max(node["depth"], 1)
+            for o in c.outputs:
+                if o.item_id:
+                    node["makes"].append({"item_id": o.item_id, "name": names.get(o.item_id, o.item_id), "alternatives": [],
+                                          "rate": n * o.quantity * (1 + prod_b), "leftover_use": True})
+            for s in _inputs(c):
+                if s.item_id:
+                    node["inputs"][s.item_id] = node["inputs"].get(s.item_id, 0.0) + n * s.quantity
+        return demand, produced, depth, nodes, raw, supply, eaten
+
+    # the passes converge on a fixed point: each credit lowers some demand, which lowers the byproducts below it
+    carry: dict[str, float] = {}
+    conv: dict[uuid.UUID, float] = {}
+    for _ in range(150):
+        demand, produced, depth, nodes, raw, supply, eaten = propagate(carry, conv)
+        nxt = {i: 0.5 * carry.get(i, 0.0) + 0.5 * v for i, v in supply.items()}
+        left = {i: produced[i] - demand.get(i, 0.0) - eaten.get(i, 0.0) for i in produced}
+        nconv = {}
+        for c, feed in converters:      # run each converter a bit more (or less) so its feed is exactly used up
+            qty = sum(s.quantity for s in _inputs(c) if s.item_id == feed) or 1.0
+            nconv[c.id] = max(0.0, conv.get(c.id, 0.0) + 0.5 * left.get(feed, 0.0) / qty)
+        small = 1e-9 * max(1.0, rate)
+        done = (all(abs(nxt.get(i, 0.0) - carry.get(i, 0.0)) <= small for i in {*nxt, *carry})
+                and all(abs(nconv[i] - conv.get(i, 0.0)) <= small for i in nconv))
+        carry, conv = nxt, nconv
+        if done:
+            break
 
     # 3. machines and power from the final crafts per second of every recipe
     rows = list(nodes.values())
@@ -307,18 +391,85 @@ def solve(
     if settings.belt:                                        # belts carry items, not fluids
         for lst in ([m for n in rows for m in n["makes"]], resources, [i for n in rows for i in n["inputs"]]):
             for x in lst:
-                if not str(x["item_id"]).startswith(("fluid:", "chemical:")):
+                if not _is_fluid(x["item_id"]):
                     x["belts"] = x["rate"] / settings.belt
     surplus = [
-        {"item_id": i, "name": names.get(i, i), "rate": produced[i] - demand.get(i, 0.0)}
-        for i in produced if produced[i] - demand.get(i, 0.0) > 1e-9
+        {"item_id": i, "name": names.get(i, i), "rate": produced[i] - demand.get(i, 0.0) - eaten.get(i, 0.0)}
+        for i in produced if produced[i] - demand.get(i, 0.0) - eaten.get(i, 0.0) > 1e-5 * max(rate, 1e-9)
     ]
     return {
         "rows": rows, "resources": resources, "surplus": surplus, "warnings": list(dict.fromkeys(warnings)),
         "power_kw": total_power, "fuel_kw": total_fuel, "machines": total_machines,
         "beacons": beacons, "beacon_power_kw": beacon_kw,
-        "found": target in chosen and chosen[target] is not None,
+        "found": target in chosen and chosen[target] is not None, "notes": [],
     }
+
+
+def _pick_converters(graph: _RecipeGraph, base: dict, settings: Settings) -> list[Converter]:
+    """Recipes that could use up the fluids the plan leaves over: a recipe fed by a leftover fluid whose products are
+    fluids the plan needs (or that another such recipe needs): oil cracking. One per leftover fluid."""
+    leftover = [x["item_id"] for x in base["surplus"] if _is_fluid(x["item_id"])]
+    if not leftover:
+        return []
+    wanted = {i["item_id"] for n in base["rows"] for i in n["inputs"] if _is_fluid(i["item_id"])}
+    recipes: dict[uuid.UUID, _Recipe] = {}
+    for rs in graph._by_output.values():
+        for r in rs:
+            if r.time_ticks and r.id not in settings.blocked and r.outputs and all(_is_fluid(o.item_id) for o in r.outputs):
+                recipes[r.id] = r
+    eats: dict[str, list[_Recipe]] = {}
+    for r in recipes.values():
+        for s in _inputs(r):
+            if _is_fluid(s.item_id):
+                eats.setdefault(s.item_id, []).append(r)
+    for _ in range(4):                                       # a fluid is useful if something turns it into a useful one
+        for item, rs in list(eats.items()):
+            if item not in wanted and any(o.item_id in wanted for r in rs for o in r.outputs if o.item_id != item):
+                wanted.add(item)
+    picked: list[Converter] = []
+    fed: set[str] = set()
+    frontier = list(leftover)
+    for _ in range(4):
+        later: list[str] = []
+        for feed in frontier:
+            if feed in fed:
+                continue
+            fed.add(feed)
+            best: tuple[float, _Recipe] | None = None
+            for r in eats.get(feed, []):
+                made = sum(o.quantity for o in r.outputs if o.item_id in wanted and o.item_id != feed)
+                eaten = sum(s.quantity for s in _inputs(r) if s.item_id == feed)
+                if made > 0 and eaten > 0 and (best is None or (made / eaten, r.import_key) > (best[0], best[1].import_key)):
+                    best = (made / eaten, r)
+            if best:
+                picked.append((best[1], feed))
+                later += [o.item_id for o in best[1].outputs if o.item_id and o.item_id != feed]
+        frontier = later
+    return picked
+
+
+def solve(
+    graph: _RecipeGraph, names: dict[str, str], target: str, rate: float, settings: Settings | None = None,
+) -> dict:
+    """`rate` is items per second. Returns rows (target first), totals, raw resources, surplus and warnings.
+
+    Leftover fluids cannot simply be thrown away in the game (a full refinery stops), so when a fluid is left over
+    the solver adds the recipes that use it up (heavy oil -> light oil -> petroleum gas by cracking), running each just
+    often enough to eat the leftover, and keeps them only if less is left over."""
+    settings = settings or Settings()
+    default = best_recipes(graph, settings.blocked, settings)
+    result = _solve(graph, names, target, rate, settings, default, [])
+    converters = _pick_converters(graph, result, settings) if settings.balance else []
+    if converters:
+        trial = _solve(graph, names, target, rate, settings, default, converters)
+        if _fluid_surplus(trial) < _fluid_surplus(result) - 1e-5 * max(rate, 1e-9):
+            result = trial
+    for row in result["rows"]:
+        if row.get("converter"):
+            result["notes"].append(f"{row['recipe']} ({row['machine']}) uses up leftover {names.get(row['feed'], row['feed'])}, "
+                                   f"which the other recipes in this plan make more of than anything needs.")
+    result["notes"] = list(dict.fromkeys(result["notes"]))
+    return result
 
 
 # ── Ratios ────────────────────────────────────────────────────────────────────

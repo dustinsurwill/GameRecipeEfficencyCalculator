@@ -18,7 +18,7 @@
           <select name="per" aria-label="Rate unit"><option value="min" {{ 'selected' if per == 'min' }}>items / minute</option><option value="s" {{ 'selected' if per == 's' }}>items / second</option></select>
         </div></div>
     </div>
-    <details class="adv" {{ 'open' if module or tier_pref or beacons }}>
+    <details class="adv" {{ 'open' if module or tier_pref or beacons or not balance }}>
       <summary>Machines, modules and beacons {% if module %}<span class="muted small">· {{ module }}</span>{% endif %}{% if beacons and bmodule %}<span class="muted small">· {{ beacons }} beacon{{ '' if beacons == 1 else 's' }}</span>{% endif %}</summary>
       <div class="stack" style="gap:.9rem;padding-top:.75rem">
         <label class="field" style="max-width:24rem"><span>Modules in every machine that can take them <span class="field-hint">· fills all slots</span></span>
@@ -35,6 +35,7 @@
           <span class="field-hint">A beacon gives {{ ((beacon.effectivity * 100)|round|int) }}% of its modules' effect, and the more beacons reach one machine the less each adds. The number of machines each beacon serves is only used to count beacons and their power (more when machines share them).</span>
         </div>
         {% endif %}
+        <label class="inline"><input type="checkbox" name="balance" value="1" {{ 'checked' if balance }}> Use up leftover fluids <span class="field-hint">· adds cracking where a refinery would otherwise back up</span></label>
         {% if belts %}
         <label class="field" style="max-width:24rem"><span>Show items as belts of</span>
           <select name="belt"><option value="">Don't show belts</option>{% for b in belts %}<option value="{{ b.name }}" {{ 'selected' if b.name == belt }}>{{ b.name }} · {{ b.items_per_s|qty }}/s</option>{% endfor %}</select></label>
@@ -71,6 +72,7 @@
     {% if result.surplus %}<p class="muted xs">Left over (byproducts nothing here uses), per {{ unit }}:
       {% for x in result.surplus %}{{ (x.rate * k)|qty }} {{ x.name }}{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
     {% for w in result.warnings %}<p class="alert">{{ w }}</p>{% endfor %}
+    {% for n in result.notes %}<p class="muted xs">{{ n }}</p>{% endfor %}
   </section>
 
   <section class="card" style="overflow-x:auto">
@@ -84,6 +86,7 @@
             <div {% if not loop.first %}style="margin-top:.35rem"{% endif %}>
               <a class="u bold" href="{{ scope.url('/items/' ~ (mk.item_id|urlq)) }}">{{ mk.name }}</a>
               <span class="num small">{{ (mk.rate * k)|qty }}</span><span class="muted xs">/{{ unit }}{% if mk.belts is defined %} · {{ mk.belts|qty }} belt{{ '' if mk.belts == 1 else 's' }}{% endif %}</span>
+              {% if mk.leftover_use %}<span class="badge" title="Made from fluid the other recipes leave over">from leftovers</span>{% endif %}
               {% if mk.overridden %}<a class="u xs" href="{{ mk.reset_href }}">use the default recipe</a>{% endif %}
               {% if mk.alternatives %}
               <details class="xs"><summary class="muted">Other ways ({{ mk.alternatives|length }})</summary>
