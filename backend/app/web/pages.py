@@ -10,6 +10,7 @@ URL layout (version may be `latest`):
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -25,7 +26,7 @@ from app.db import get_session
 from app.discovery import service
 from app.discovery.index import DiscoveryIndex
 from app.models.identity import MachineUpgradeItem, MachineUpgradeModifier
-from app.models.versioning import Game
+from app.models.versioning import Game, Mod, ModVersion
 from app.discovery.scope import (
     Scope, ScopeNotFound, get_game, list_games, list_packs, list_versions,
 )
@@ -153,8 +154,12 @@ async def item_page(
     facets = item["machines"]["made_in" if tab == "output" else "used_in"]
     mid = _uuid_or_none(machine)
     block = await _recipe_block(session, scope, idx, item=item_id, role=tab, machine=mid)
+    ratio_rows: list[dict[str, Any]] = []
+    if scope.recipe_metric == "throughput" and item["made_by"] > 0:
+        loaded = await chains._get_graph(session, set(scope.mod_version_ids))
+        ratio_rows = factory.ratios(loaded.graph, loaded.item_to_canonical, item["item_id"])
     return render(
-        request, "item.html", scope=scope, item=item, tab=tab, machine=machine if mid else "",
+        request, "item.html", scope=scope, item=item, ratio_rows=ratio_rows, tab=tab, machine=machine if mid else "",
         facets=facets, highlight=item_id, rec_params={"item": item_id, "role": tab, "machine": machine if mid else ""},
         **block,
     )
@@ -332,6 +337,23 @@ async def routes_page(
 MODULE_EFFECTS = {"SPEED": "speed", "YIELD_BONUS": "productivity", "ENERGY_USE": "consumption"}
 
 
+async def _game_constants(session: AsyncSession, scope: Scope) -> dict[str, Any]:
+    """The game's belts and beacon (Game.constants_json), minus anything from mods that are not in this scope."""
+    game = await session.get(Game, scope.game_id)
+    try:
+        raw = json.loads(game.constants_json) if game and game.constants_json else {}
+    except ValueError:
+        raw = {}
+    namespaces = set((await session.execute(
+        select(Mod.namespace).join(ModVersion, ModVersion.mod_id == Mod.id).where(ModVersion.id.in_(scope.mod_version_ids))
+    )).scalars().all())
+    belts = [b for b in raw.get("belts") or [] if not b.get("mod") or b["mod"] in namespaces]
+    beacon = raw.get("beacon")
+    if beacon and beacon.get("mod") and beacon["mod"] not in namespaces:
+        beacon = None
+    return {"belts": belts, "beacon": beacon}
+
+
 async def _load_modules(session: AsyncSession, game_id: uuid.UUID) -> dict[str, dict[str, factory.Module]]:
     """machine id -> {module name: Module} from the machines' upgrade items."""
     from app.models.identity import MachineIdentity
@@ -354,6 +376,7 @@ async def _load_modules(session: AsyncSession, game_id: uuid.UUID) -> dict[str, 
 async def factory_page(
     request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx, session: AsyncSession = Depends(get_session),
     target: str = "", rate: float = Query(60, ge=0, le=1_000_000_000), per: str = "min", module: str = "",
+    beacons: int = Query(0, ge=0, le=12), bmodule: str = "", bshare: float = Query(1, gt=0, le=64), belt: str = "",
     u: list[str] = Query([]), t: list[str] = Query([]),
 ):
     """The whole factory for N of an item per minute (or second): recipe tree, machines, power, raw resources."""
@@ -370,6 +393,17 @@ async def factory_page(
         ({"name": m.name, "tiers": [x["name"] for x in m.tiers]} for m in machines.values() if len(m.tiers) > 1),
         key=lambda m: m["name"])
     module_names = sorted({n for ms in modules.values() for n in ms})
+    constants = await _game_constants(session, scope)
+    beacon = constants["beacon"]
+    # a beacon only takes modules whose every effect it allows (no productivity)
+    beacon_modules = sorted({
+        name for ms in modules.values() for name, mo in ms.items()
+        if beacon and all(e in (beacon.get("allowed_effects") or []) for e in mo.effects)
+    })
+    belts = constants["belts"]
+    belt_speed = next((b["items_per_s"] for b in belts if b["name"] == belt), None)
+    if belt == "" and belts and request.query_params.get("ran") != "1":
+        belt, belt_speed = belts[-1]["name"], belts[-1]["items_per_s"]          # first visit: the fastest belt
 
     overrides: dict[str, uuid.UUID] = {}
     for entry in u:
@@ -385,12 +419,18 @@ async def factory_page(
         rate_s = rate / 60 if per == "min" else rate
         result = factory.solve(
             loaded.graph, loaded.item_to_canonical, target, rate_s,
-            factory.Settings(overrides=overrides, tier_pref=tier_pref, module=module or None, modules=modules),
+            factory.Settings(
+                overrides=overrides, tier_pref=tier_pref, module=module or None, modules=modules,
+                beacons=beacons if bmodule and beacon else 0, beacon_module=bmodule or None, beacon_share=bshare,
+                beacon=beacon, belt=belt_speed,
+            ),
         )
 
         def url(new_overrides: dict[str, uuid.UUID]) -> str:
             pairs = [("target", target), ("rate", f"{rate:g}"), ("per", per)]
             pairs += [("module", module)] if module else []
+            pairs += [("beacons", str(beacons)), ("bmodule", bmodule), ("bshare", f"{bshare:g}")] if beacons and bmodule else []
+            pairs += [("ran", "1"), ("belt", belt)]
             pairs += [("t", e) for e in t] + [("u", f"{i}@{rid}") for i, rid in new_overrides.items()]
             return scope.url("/factory") + "?" + urlencode(pairs)
 
@@ -404,6 +444,8 @@ async def factory_page(
         request, "factory.html", scope=scope, target=sel_target, rate=rate, per=per, module=module, result=result,
         k=60 if per == "min" else 1, unit="min" if per == "min" else "s", machine_options=machine_options,
         module_names=module_names, tier_pref=tier_pref, overrides=overrides,
+        beacons=beacons, bmodule=bmodule, bshare=bshare, beacon_modules=beacon_modules, has_beacon=bool(beacon),
+        belts=belts, belt=belt, beacon=beacon,
         error="No recipe makes that item." if result and not result["found"] else None,
     )
 

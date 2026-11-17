@@ -9,6 +9,7 @@
   </header>
 
   <form class="card pad stack" method="get" action="{{ scope.url('/factory') }}" id="factory-form" hx-boost="false">
+    <input type="hidden" name="ran" value="1">
     <div class="grid cols-2">
       <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
       <div class="field"><span>How much <span class="field-hint">· decimals are fine</span></span>
@@ -17,12 +18,27 @@
           <select name="per" aria-label="Rate unit"><option value="min" {{ 'selected' if per == 'min' }}>items / minute</option><option value="s" {{ 'selected' if per == 's' }}>items / second</option></select>
         </div></div>
     </div>
-    <details class="adv" {{ 'open' if module or tier_pref }}>
-      <summary>Machines and modules {% if module %}<span class="muted small">· {{ module }}</span>{% endif %}</summary>
+    <details class="adv" {{ 'open' if module or tier_pref or beacons }}>
+      <summary>Machines, modules and beacons {% if module %}<span class="muted small">· {{ module }}</span>{% endif %}{% if beacons and bmodule %}<span class="muted small">· {{ beacons }} beacon{{ '' if beacons == 1 else 's' }}</span>{% endif %}</summary>
       <div class="stack" style="gap:.9rem;padding-top:.75rem">
         <label class="field" style="max-width:24rem"><span>Modules in every machine that can take them <span class="field-hint">· fills all slots</span></span>
           <select name="module"><option value="">None</option>{% for n in module_names %}<option value="{{ n }}" {{ 'selected' if n == module }}>{{ n }}</option>{% endfor %}</select>
           <span class="field-hint">A module is only used where the machine accepts everything it does, and productivity only where the recipe allows it.</span></label>
+        {% if has_beacon %}
+        <div class="field">
+          <span>Beacons <span class="field-hint">· speed (and its power cost) for every machine that takes modules</span></span>
+          <div class="row" style="flex-wrap:wrap">
+            <label class="row small">Beacons reaching each machine <input type="number" name="beacons" min="0" max="12" step="1" value="{{ beacons }}" style="max-width:5rem"></label>
+            <label class="row small">with <select name="bmodule"><option value="">no module</option>{% for n in beacon_modules %}<option value="{{ n }}" {{ 'selected' if n == bmodule }}>{{ n }}</option>{% endfor %}</select> in both slots</label>
+            <label class="row small">each beacon serves <input type="number" name="bshare" min="0.5" max="64" step="any" value="{{ bshare|qty }}" style="max-width:5rem"> machines</label>
+          </div>
+          <span class="field-hint">A beacon gives {{ ((beacon.effectivity * 100)|round|int) }}% of its modules' effect, and the more beacons reach one machine the less each adds. The number of machines each beacon serves is only used to count beacons and their power (more when machines share them).</span>
+        </div>
+        {% endif %}
+        {% if belts %}
+        <label class="field" style="max-width:24rem"><span>Show items as belts of</span>
+          <select name="belt"><option value="">Don't show belts</option>{% for b in belts %}<option value="{{ b.name }}" {{ 'selected' if b.name == belt }}>{{ b.name }} · {{ b.items_per_s|qty }}/s</option>{% endfor %}</select></label>
+        {% endif %}
         <div class="grid cols-2">
           {% for mo in machine_options %}
           <label class="field"><span>{{ mo.name }}</span>
@@ -44,11 +60,12 @@
       <div><div class="muted xs">Machines</div><div class="bold num">{{ result.machines|num }}</div></div>
       <div><div class="muted xs">Electric power</div><div class="bold num">{{ result.power_kw|power }}</div></div>
       <div><div class="muted xs">Fuel burned by machines</div><div class="bold num">{{ result.fuel_kw|power if result.fuel_kw else '—' }}</div></div>
+      {% if result.beacons %}<div><div class="muted xs">Beacons</div><div class="bold num">{{ result.beacons|num }} <span class="muted xs">· {{ result.beacon_power_kw|power }} (in the power above)</span></div></div>{% endif %}
     </div>
     <div>
       <div class="muted xs">Raw resources, per {{ unit }}</div>
       <div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.25rem">
-        {% for x in result.resources %}<span class="badge" title="{{ x.machine or 'no recipe makes it' }}">{{ (x.rate * k)|qty }} {{ x.name }}{% if x.machines %} · {{ x.machines }}× {{ x.machine }}{% endif %}</span>{% endfor %}
+        {% for x in result.resources %}<span class="badge" title="{{ x.machine or 'no recipe makes it' }}">{{ (x.rate * k)|qty }} {{ x.name }}{% if x.machines %} · {{ x.machines }}× {{ x.machine }}{% endif %}{% if x.belts is defined %} · {{ x.belts|qty }} belt{{ '' if x.belts == 1 else 's' }}{% endif %}</span>{% endfor %}
       </div>
     </div>
     {% if result.surplus %}<p class="muted xs">Left over (byproducts nothing here uses), per {{ unit }}:
@@ -66,7 +83,7 @@
             {% for mk in row.makes %}
             <div {% if not loop.first %}style="margin-top:.35rem"{% endif %}>
               <a class="u bold" href="{{ scope.url('/items/' ~ (mk.item_id|urlq)) }}">{{ mk.name }}</a>
-              <span class="num small">{{ (mk.rate * k)|qty }}</span><span class="muted xs">/{{ unit }}</span>
+              <span class="num small">{{ (mk.rate * k)|qty }}</span><span class="muted xs">/{{ unit }}{% if mk.belts is defined %} · {{ mk.belts|qty }} belt{{ '' if mk.belts == 1 else 's' }}{% endif %}</span>
               {% if mk.overridden %}<a class="u xs" href="{{ mk.reset_href }}">use the default recipe</a>{% endif %}
               {% if mk.alternatives %}
               <details class="xs"><summary class="muted">Other ways ({{ mk.alternatives|length }})</summary>
@@ -74,12 +91,12 @@
               </details>{% endif %}
             </div>
             {% endfor %}
-            {% if row.inputs %}<div class="muted xs" style="margin-top:.25rem">needs {% for i in row.inputs %}{{ (i.rate * k)|qty }} {{ i.name }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+            {% if row.inputs %}<div class="muted xs" style="margin-top:.25rem">needs {% for i in row.inputs %}{{ (i.rate * k)|qty }} {{ i.name }}{% if i.belts is defined %} ({{ i.belts|qty }} belt{{ '' if i.belts == 1 else 's' }}){% endif %}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
           </td>
           <td>
             <div class="small">{% if row.machines is not none %}<b class="num">{{ row.machines }}×</b> {{ row.tier }}{% else %}{{ row.machine }}{% endif %}
               <span class="muted xs">· {{ row.recipe }}, {{ row.seconds|qty }} s</span></div>
-            {% if row.machines is not none %}<div class="muted xs">{{ row.machines_exact|qty }} needed exactly{% if row.modules %} · {{ row.modules }}× {{ row.module_name }} each{% endif %}{% if row.productivity %} · +{{ (row.productivity * 100)|qty }}% output{% if row.base_productivity %} ({{ (row.base_productivity * 100)|qty }}% built in){% endif %}{% endif %}</div>{% endif %}
+            {% if row.machines is not none %}<div class="muted xs">{{ row.machines_exact|qty }} needed exactly{% if row.modules %} · {{ row.modules }}× {{ row.module_name }} each{% endif %}{% if row.beacon_speed %} · +{{ (row.beacon_speed * 100)|qty }}% speed from beacons{% endif %}{% if row.productivity %} · +{{ (row.productivity * 100)|qty }}% output{% if row.base_productivity %} ({{ (row.base_productivity * 100)|qty }}% built in){% endif %}{% endif %}</div>{% endif %}
           </td>
           <td class="num" style="text-align:right;padding-right:1rem">{% if row.machines is not none %}{{ row.power_kw|power }}{% if row.fuel %} <span class="muted xs">fuel</span>{% endif %}{% endif %}</td>
         </tr>

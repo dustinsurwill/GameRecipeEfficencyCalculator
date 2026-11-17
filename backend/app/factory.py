@@ -40,6 +40,11 @@ class Settings:
     module: str | None = None                                           # module name filling all slots
     modules: dict[str, dict[str, Module]] = field(default_factory=dict)  # machine id -> module name -> Module
     blocked: set[uuid.UUID] = field(default_factory=set)                # recipes never to pick
+    beacons: int = 0                                                    # beacons reaching every machine that takes modules
+    beacon_module: str | None = None                                    # module name filling both beacon slots
+    beacon_share: float = 1.0                                           # machines each beacon serves (for the beacon count)
+    beacon: dict | None = None                                          # the game's beacon: module_slots, effectivity, profile, ...
+    belt: float | None = None                                           # items per second one belt carries
 
 
 def recipe_label(r: _Recipe) -> str:
@@ -126,6 +131,33 @@ def pick_tier(r: _Recipe, pref: dict[str, str]) -> dict | None:
     return electric[-1]                                     # fastest electric one
 
 
+def _find_module(settings: Settings, name: str | None) -> Module | None:
+    if not name:
+        return None
+    for ms in settings.modules.values():
+        if name in ms:
+            return ms[name]
+    return None
+
+
+def beacon_bonus(tier: dict, settings: Settings) -> tuple[float, float]:
+    """(speed, consumption) bonus a machine gets from the beacons reaching it. Only machines with module slots are
+    affected, a beacon takes no productivity, and with n beacons each one's effect is scaled by profile[n - 1]
+    (the beacon's diminishing returns), so 4 beacons give 4 * 0.5 = 2x one beacon's effect, not 4x."""
+    b = settings.beacon
+    mod = _find_module(settings, settings.beacon_module)
+    if not (b and mod and settings.beacons > 0 and tier.get("module_slots")):
+        return 0.0, 0.0
+    if any(k not in (b.get("allowed_effects") or []) for k in mod.effects):
+        return 0.0, 0.0                                      # e.g. productivity modules do not fit a beacon
+    profile = b.get("profile") or [1.0]
+    n = settings.beacons
+    each = b.get("module_slots", 2) * b.get("effectivity", 1.0) * profile[min(n, len(profile)) - 1]
+    allowed = set(tier.get("allowed_effects") or [])
+    return (n * each * mod.effects.get("speed", 0.0) if "speed" in allowed else 0.0,
+            n * each * mod.effects.get("consumption", 0.0) if "consumption" in allowed else 0.0)
+
+
 MAX_PRODUCTIVITY = 3.0    # the game caps the productivity bonus at +300%
 
 
@@ -133,17 +165,18 @@ def module_bonus(r: _Recipe, tier: dict, settings: Settings) -> tuple[float, flo
     """(speed bonus, productivity bonus, consumption bonus, module count, module name) for one machine.
     The machine's own productivity (`base_productivity`: foundry, electromagnetic plant and biochamber give
     +50%) always counts, but only for recipes that allow productivity. A module is only used where every
-    effect it has is allowed by the machine (and productivity by the recipe)."""
+    effect it has is allowed by the machine (and productivity by the recipe). Beacons add speed and consumption."""
     base = float(tier.get("base_productivity") or 0) if r.allow_productivity else 0.0
+    b_speed, b_cons = beacon_bonus(tier, settings)
     mod = settings.modules.get(r.machine.id, {}).get(settings.module or "")
     slots = int(tier.get("module_slots") or 0)
     allowed = set(tier.get("allowed_effects") or [])
     if (not mod or not slots or any(k not in allowed for k in mod.effects)
             or (mod.effects.get("productivity", 0) > 0 and not r.allow_productivity)):
-        return 0.0, min(base, MAX_PRODUCTIVITY), 0.0, 0, None
+        return b_speed, min(base, MAX_PRODUCTIVITY), b_cons, 0, None
     e = mod.effects
-    return (slots * e.get("speed", 0.0), min(base + slots * e.get("productivity", 0.0), MAX_PRODUCTIVITY),
-            slots * e.get("consumption", 0.0), slots, mod.name)
+    return (slots * e.get("speed", 0.0) + b_speed, min(base + slots * e.get("productivity", 0.0), MAX_PRODUCTIVITY),
+            slots * e.get("consumption", 0.0) + b_cons, slots, mod.name)
 
 
 def solve(
@@ -242,6 +275,7 @@ def solve(
     rows = list(nodes.values())
     total_power = total_fuel = 0.0
     total_machines = 0
+    beacon_machines = 0
     for node in rows:
         r, tier = node.pop("_r"), node.pop("_tier")
         speed_b, cons_b = node.pop("_speed"), node.pop("_cons")
@@ -253,6 +287,9 @@ def solve(
         count = math.ceil(exact - 1e-9)
         power = count * tier.get("power_kw", 0.0) * max(MIN_FACTOR, 1 + cons_b)
         node.update(tier=tier["name"], machines_exact=exact, machines=count, power_kw=power, fuel=bool(tier.get("fuel")))
+        if any(beacon_bonus(tier, settings)):
+            node["beacon_speed"] = beacon_bonus(tier, settings)[0]
+            beacon_machines += count
         total_machines += count
         if tier.get("fuel"):
             total_fuel += power
@@ -264,6 +301,14 @@ def solve(
         {"item_id": m["item_id"], "name": m["name"], "rate": m["rate"], "machine": n["machine"], "machines": n["machines"]}
         for n in rows if not n["inputs"] for m in n["makes"]
     ] + raw
+    beacons = math.ceil(beacon_machines * settings.beacons / max(settings.beacon_share, 1e-9) - 1e-9) if beacon_machines else 0
+    beacon_kw = beacons * (settings.beacon or {}).get("power_kw", 0.0)
+    total_power += beacon_kw
+    if settings.belt:                                        # belts carry items, not fluids
+        for lst in ([m for n in rows for m in n["makes"]], resources, [i for n in rows for i in n["inputs"]]):
+            for x in lst:
+                if not str(x["item_id"]).startswith(("fluid:", "chemical:")):
+                    x["belts"] = x["rate"] / settings.belt
     surplus = [
         {"item_id": i, "name": names.get(i, i), "rate": produced[i] - demand.get(i, 0.0)}
         for i in produced if produced[i] - demand.get(i, 0.0) > 1e-9
@@ -271,5 +316,69 @@ def solve(
     return {
         "rows": rows, "resources": resources, "surplus": surplus, "warnings": list(dict.fromkeys(warnings)),
         "power_kw": total_power, "fuel_kw": total_fuel, "machines": total_machines,
+        "beacons": beacons, "beacon_power_kw": beacon_kw,
         "found": target in chosen and chosen[target] is not None,
     }
+
+
+# ── Ratios ────────────────────────────────────────────────────────────────────
+
+def _per_machine(r: _Recipe, settings: Settings) -> tuple[dict | None, float, float]:
+    """(tier, crafts per second one machine runs, productivity) for a recipe in its default tier."""
+    tier = pick_tier(r, settings.tier_pref)
+    if not tier or not r.time_ticks:
+        return None, 0.0, 0.0
+    speed_b, prod_b, _, _, _ = module_bonus(r, tier, settings)
+    return tier, tier["speed"] * max(MIN_FACTOR, 1 + speed_b) / (r.time_ticks / 60), prod_b
+
+
+def small_ratio(x: float, limit: int = 12) -> tuple[int, int] | None:
+    """x producers per consumer as a whole pair 'k consumers : p producers' (1 : 2, 3 : 2, ...): the smallest exact
+    one (within 0.5%), else the smallest within 4%, else None."""
+    if x <= 0:
+        return None
+    for tol in (0.005, 0.04):
+        for k in range(1, limit + 1):
+            p = round(x * k)
+            if p >= 1 and abs(x * k - p) <= tol * p:
+                return k, p
+    return None
+
+
+def ratios(graph: _RecipeGraph, names: dict[str, str], item: str, settings: Settings | None = None,
+           limit: int = 8) -> list[dict]:
+    """For every recipe that makes `item` (the default first): what one machine of it makes and consumes per second,
+    and for each input how many machines of the input's default recipe keep it fed ("1 gear assembler : 2 rail
+    assemblers"). Machines are the fastest electric tier unless `settings.tier_pref` says otherwise."""
+    settings = settings or Settings()
+    default = best_recipes(graph, settings.blocked, settings)
+    candidates = _candidates(graph, item, settings.blocked)
+    candidates.sort(key=lambda r: (default.get(item) is not r, r.import_key))
+    out = []
+    for r in candidates[:limit]:
+        tier, crafts, prod = _per_machine(r, settings)
+        if not tier:
+            continue
+        made = sum(o.quantity for o in r.outputs if o.item_id == item) * (1 + prod) * crafts
+        inputs = []
+        for s in _inputs(r):
+            if not s.item_id:
+                continue
+            need = s.quantity * crafts
+            feeder = default.get(s.item_id)
+            row = {"item_id": s.item_id, "name": names.get(s.item_id, s.item_id.split(":")[-1].replace("-", " ")),
+                   "per_s": need, "feeder": None, "machines": None, "pair": None}
+            if feeder:
+                f_tier, f_crafts, f_prod = _per_machine(feeder, settings)
+                f_out = sum(o.quantity for o in feeder.outputs if o.item_id == s.item_id) * (1 + f_prod) * f_crafts
+                if f_tier and f_out > 0:
+                    row["feeder"] = {"machine": f_tier["name"], "recipe": recipe_label(feeder), "recipe_id": str(feeder.id)}
+                    row["machines"] = need / f_out
+                    row["pair"] = small_ratio(row["machines"])
+            inputs.append(row)
+        out.append({
+            "recipe_id": str(r.id), "recipe": recipe_label(r), "machine": r.machine.name, "tier": tier["name"],
+            "seconds": r.time_ticks / 60, "default": default.get(item) is r, "makes_per_s": made,
+            "productivity": prod, "inputs": inputs,
+        })
+    return out

@@ -50,9 +50,10 @@ def tag_label(tag: str) -> str:
     return words if ns in ("c", "minecraft", "") else f"{words} ({ns})"
 
 
-def fmt_ticks(ticks) -> str:
-    s = ticks / 20
-    return f"{s:.0f}s" if ticks % 20 == 0 else f"{s:.1f}s"
+def fmt_ticks(ticks, per_second: int = 20) -> str:
+    """Minecraft runs 20 ticks per second, Factorio 60."""
+    s = ticks / per_second
+    return f"{s:.0f}s" if ticks % per_second == 0 else f"{s:.2f}".rstrip("0").rstrip(".") + "s"
 
 
 def q(value: str) -> str:

@@ -30,6 +30,8 @@ class Game(TimestampMixin, table=True):
     slug: str = Field(unique=True, index=True)
     recipe_metric: str = Field(default="discrete")  # "discrete" | "throughput"
     icon_url: str | None = None
+    # game-wide numbers the planner needs, as JSON: {"belts": [{name, items_per_s}], "beacon": {...}}
+    constants_json: str | None = None
 
     versions: list["GameVersion"] = Relationship(back_populates="game")
     mods: list["Mod"] = Relationship(back_populates="game")

@@ -67,12 +67,13 @@ MOD_FILES: dict[str, list[str]] = {
     "base": [
         "prototypes/recipe.lua", "prototypes/item.lua", "prototypes/entity/entities.lua",
         "prototypes/entity/mining-drill.lua", "prototypes/entity/resources.lua", "prototypes/tile/tiles.lua",
+        "prototypes/entity/transport-belts.lua",
     ],
     "elevated-rails": ["prototypes/recipe/elevated-rails.lua"],
     "quality": ["prototypes/recipe.lua", "prototypes/item.lua"],
     "space-age": [
         "prototypes/recipe.lua", "prototypes/entity/entities.lua", "prototypes/entity/big-mining-drill.lua",
-        "prototypes/entity/resources.lua", "prototypes/tile/tiles-vulcanus.lua",
+        "prototypes/entity/resources.lua", "prototypes/entity/transport-belts.lua", "prototypes/tile/tiles-vulcanus.lua",
         "prototypes/tile/tiles-fulgora.lua", "prototypes/tile/tiles-gleba.lua", "prototypes/tile/tiles-aquilo.lua",
     ],
 }
@@ -398,6 +399,43 @@ def module_catalog(pack_data: dict[str, list[dict]], names: dict[str, str], owne
     return out
 
 
+BELT_ITEMS_PER_S = 480      # a belt's `speed` is tiles per tick; 480 items per second per unit of it (0.03125 -> 15/s)
+
+
+def game_constants(pack_data: dict[str, list[dict]], names: dict[str, str]) -> dict:
+    """Numbers that are not recipes: belt throughput and the beacon. Stored on the game (`constants_json`)."""
+    belts = [{"name": names.get(b["name"], b["name"]), "items_per_s": round(float(b["speed"]) * BELT_ITEMS_PER_S, 4),
+              "mod": b["__mod"]} for b in pack_data.get("transport-belt", []) if b.get("speed")]
+    belts.sort(key=lambda b: b["items_per_s"])
+    beacon = None
+    for b in pack_data.get("beacon", []):
+        beacon = {
+            "name": names.get(b["name"], b["name"]), "mod": b["__mod"],
+            "module_slots": int(b.get("module_slots") or 0), "allowed_effects": _effects(b.get("allowed_effects")),
+            "power_kw": _kw(b.get("energy_usage")), "effectivity": float(b.get("distribution_effectivity") or 1),
+            # each beacon's effect is multiplied by profile[n - 1] when n beacons reach the same machine
+            "profile": [float(x) for x in (b.get("profile") or [1])],
+        }
+        break
+    return {"belts": belts, "beacon": beacon}
+
+
+def merge_constants(into: dict, new: dict) -> None:
+    known = {(b["name"], b["mod"]) for b in into.setdefault("belts", [])}
+    into["belts"].extend(b for b in new["belts"] if (b["name"], b["mod"]) not in known)
+    into["belts"].sort(key=lambda b: b["items_per_s"])
+    if not into.get("beacon"):
+        into["beacon"] = new["beacon"]
+
+
+async def _apply_constants(constants: dict) -> None:
+    async with async_session_factory() as session:
+        async with session.begin():
+            game = (await session.exec(select(Game).where(Game.slug == "factorio"))).scalars().one()
+            game.constants_json = json.dumps(constants)
+            session.add(game)
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 async def _purge() -> None:
@@ -510,6 +548,7 @@ async def run(factorio_dir: Path) -> None:
     all_tiers: dict[str, list[dict]] = {}
     all_names: dict[str, str] = {}
     all_modules: dict[str, dict] = {}
+    constants: dict = {}
     for pack in PACKS:
         print(f"{pack.name}:")
         data = load_pack_data(data_dir, pack)
@@ -547,10 +586,13 @@ async def run(factorio_dir: Path) -> None:
             known = {(t["name"], t["mod"]) for t in all_tiers.get(machine, [])}
             all_tiers.setdefault(machine, []).extend(t for t in lst if (t["name"], t["mod"]) not in known)
         all_names.update(names)
+        merge_constants(constants, game_constants(data, names))
         for mod in module_catalog(data, names, owner):
             all_modules.setdefault(mod["item_id"], mod)
 
     await _apply_machine_data(all_tiers)
+    await _apply_constants(constants)
+    print(f"  Belts: {[b['name'] for b in constants['belts']]}, beacon: {bool(constants['beacon'])}")
     print(f"  Module upgrades stored: {await _apply_modules(list(all_modules.values()), all_tiers)}")
     print(f"  Display names updated: {await _apply_display_names(all_names)}")
 

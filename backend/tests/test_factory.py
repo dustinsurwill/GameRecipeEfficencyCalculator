@@ -1,5 +1,5 @@
 """Factory calculator: recipe choice, machine counts, modules, loops and byproducts (pure, no database)."""
-from app.factory import Module, Settings, solve
+from app.factory import Module, Settings, ratios, small_ratio, solve
 from tests.test_chains import graph, rec
 
 NAMES = {"b:ore": "Ore", "b:plate": "Plate", "b:gear": "Gear", "b:slag": "Slag"}
@@ -147,3 +147,64 @@ def test_default_recipe_prefers_the_machine_with_built_in_productivity():
     foundry.allow_productivity = False
     row = by_item(solve(graph(plain, foundry, ore), NAMES, "b:plate", 3))["b:plate"]
     assert row["machine"] == "assembler"
+
+
+BEACON = {"module_slots": 2, "effectivity": 1.5, "power_kw": 480, "allowed_effects": ["speed", "consumption"],
+          "profile": [1, 0.7071, 0.5773, 0.5]}
+
+
+def _beacon_line():
+    mine, smelt, gear = line()
+    return graph(mine, smelt, gear), gear
+
+
+def test_beacons_speed_machines_up_with_diminishing_returns_and_cost_power():
+    g, gear = _beacon_line()
+    speed = Module("Speed", {"speed": 0.5, "consumption": 0.7})
+    mods = {gear.machine.id: {"Speed": speed}}
+    base = by_item(solve(g, NAMES, "b:gear", 3))["b:gear"]
+    one = solve(g, NAMES, "b:gear", 3, Settings(beacons=1, beacon_module="Speed", beacon=BEACON, modules=mods))
+    row = by_item(one)["b:gear"]
+    assert abs(row["beacon_speed"] - 1.5) < 1e-9                    # 2 slots * 50% * 1.5 effectivity
+    assert abs(row["machines_exact"] - base["machines_exact"] / 2.5) < 1e-9
+    assert one["beacons"] >= 1 and one["beacon_power_kw"] == one["beacons"] * 480
+    four = solve(g, NAMES, "b:gear", 3, Settings(beacons=4, beacon_module="Speed", beacon=BEACON, modules=mods))
+    assert abs(by_item(four)["b:gear"]["beacon_speed"] - 4 * 0.5 * 1.5 * 2 * 0.5) < 1e-9     # 4 beacons at profile 0.5
+    shared = solve(g, NAMES, "b:gear", 3, Settings(beacons=4, beacon_share=4, beacon_module="Speed", beacon=BEACON, modules=mods))
+    assert shared["beacons"] * 4 <= four["beacons"] + 3
+
+
+def test_beacons_skip_productivity_modules_and_machines_without_slots():
+    g, gear = _beacon_line()
+    prod = Module("Prod", {"productivity": 0.1})
+    s = Settings(beacons=2, beacon_module="Prod", beacon=BEACON, modules={gear.machine.id: {"Prod": prod}})
+    res = solve(g, NAMES, "b:gear", 3, s)
+    assert res["beacons"] == 0 and "beacon_speed" not in by_item(res)["b:gear"]
+    speed = Module("Speed", {"speed": 0.5})
+    s = Settings(beacons=2, beacon_module="Speed", beacon=BEACON, modules={gear.machine.id: {"Speed": speed}})
+    drill = by_item(solve(g, NAMES, "b:ore", 3, s))["b:ore"]
+    assert "beacon_speed" not in drill                                # the drill has no module slots
+
+
+def test_belts_count_items_but_not_fluids():
+    g, _ = _beacon_line()
+    res = solve(g, NAMES, "b:gear", 15, Settings(belt=15.0))
+    row = by_item(res)["b:gear"]
+    assert abs(row["makes"][0]["belts"] - 1.0) < 1e-9
+    assert all("belts" in i for i in row["inputs"])
+    assert "belts" not in by_item(solve(g, NAMES, "b:gear", 15))["b:gear"]["makes"][0]
+
+
+def test_ratios_say_how_many_feeder_machines_one_machine_needs():
+    g, gear = _beacon_line()
+    res = ratios(g, NAMES, "b:gear")
+    assert len(res) == 1 and res[0]["default"]
+    row = res[0]
+    assert row["tier"] == "Assembler" and abs(row["makes_per_s"] - 1.5) < 1e-9        # 0.75 speed / 0.5 s
+    plate = row["inputs"][0]
+    assert abs(plate["per_s"] - 3.0) < 1e-9                                           # 2 plates per craft, 1.5 crafts/s
+    assert plate["feeder"]["machine"] == "Electric furnace"
+    assert abs(plate["machines"] - 3.0 / (2 / 3.2)) < 1e-9                            # furnace: 2 / 3.2 = 0.625 plates/s
+    assert plate["pair"] == (5, 24)                                                    # 4.8 furnaces per assembler
+    assert small_ratio(2.0) == (1, 2) and small_ratio(0.5) == (2, 1) and small_ratio(1.5) == (2, 3)
+    assert small_ratio(0.0) is None and small_ratio(4.8) == (5, 24)

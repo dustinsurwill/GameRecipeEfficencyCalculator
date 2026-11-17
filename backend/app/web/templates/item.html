@@ -27,6 +27,28 @@
     <a class="btn" href="{{ scope.url('/routes?target=' ~ (item.item_id|urlq)) }}">Find routes to this item →</a>
   </header>
 
+  {% if ratio_rows %}
+  <section class="card pad stack" id="ratios">
+    <h2 class="h2">Machine ratios</h2>
+    <p class="muted xs" style="max-width:44rem">What one machine makes and eats, and how many machines of the default recipe for each input keep it running. Fastest electric machines, no modules or beacons — the <a class="u" href="{{ scope.url('/factory?target=' ~ (item.item_id|urlq)) }}">factory page</a> sizes whole trees with those.</p>
+    {% for rr in ratio_rows %}
+    <div {% if not loop.first %}class="stack" style="border-top:1px solid var(--border, rgba(128,128,128,.25));padding-top:.6rem;gap:.35rem"{% else %}class="stack" style="gap:.35rem"{% endif %}>
+      <div class="small"><b>{{ rr.machine }}</b> · {{ rr.recipe }}{% if rr.default %} <span class="badge">default</span>{% endif %}
+        <span class="muted xs">· {{ rr.tier }}, {{ rr.seconds|qty }} s per craft{% if rr.productivity %}, +{{ (rr.productivity * 100)|qty }}% output built in{% endif %}</span></div>
+      <div class="small">One {{ rr.tier }} makes <b class="num">{{ rr.makes_per_s|qty }}</b>/s <span class="muted">({{ (rr.makes_per_s * 60)|qty }}/min)</span> {{ item.name }}.</div>
+      {% for i in rr.inputs %}
+      <div class="small" style="padding-left:.75rem">
+        needs <b class="num">{{ i.per_s|qty }}</b>/s <a class="u" href="{{ scope.url('/items/' ~ (i.item_id|urlq)) }}">{{ i.name }}</a>
+        {% if i.feeder %}← <b class="num">{{ i.machines|qty }}</b>× {{ i.feeder.machine }} <span class="muted xs">({{ i.feeder.recipe }})</span>
+          {% if i.pair %}<span class="badge" title="{{ i.pair[0] }} {{ rr.tier }} to {{ i.pair[1] }} {{ i.feeder.machine }}">{{ i.pair[0] }} : {{ i.pair[1] }}</span>{% endif %}
+        {% else %}<span class="muted xs">· raw, nothing here makes it</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
   <section id="recipes-section" class="stack">
     {% set base = scope.url('/items/' ~ (item.item_id|urlq)) %}
     <div class="tabs" role="tablist">

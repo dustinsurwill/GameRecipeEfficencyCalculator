@@ -44,7 +44,7 @@
   <header class="recipe-h">
     <a class="m" href="{{ scope.url('/machines/' ~ r.machine.id) }}">{{ r.machine.name }}</a>
     <a class="mono" href="{{ scope.url('/mods/' ~ r.namespace) }}">{{ r.namespace }}</a>
-    {% if r.time_ticks %}<span>{{ r.time_ticks|ticks }}</span>{% endif %}
+    {% if r.time_ticks %}<span>{{ r.time_ticks|ticks(60 if scope.recipe_metric == 'throughput' else 20) }}</span>{% endif %}
     {% if r.energy_rf %}<span>{{ r.energy_rf|num }} RF</span>{% endif %}
     {% if r.modpack_override %}<span class="badge">Modpack recipe</span>{% endif %}
   </header>

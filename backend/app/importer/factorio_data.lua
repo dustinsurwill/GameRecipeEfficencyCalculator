@@ -146,6 +146,8 @@ local KEEP = {
   ["offshore-pump"] = {"name", "type", "pumping_speed", "__mod"},
   module = {"name", "category", "tier", "effect", "__mod"},
   tile = {"name", "fluid", "__mod"},
+  ["transport-belt"] = {"name", "speed", "__mod"},
+  beacon = {"name", "module_slots", "allowed_effects", "energy_usage", "distribution_effectivity", "profile", "__mod"},
 }
 local out = {}
 for ptype, spec in pairs(KEEP) do

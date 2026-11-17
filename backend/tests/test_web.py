@@ -316,3 +316,28 @@ async def test_factory_page_is_only_for_time_based_games(client: TestClient, see
 async def test_route_page_hides_minecraft_crafting_option_elsewhere(client: TestClient, factory_world):
     fact = client.get("/factorio/space/1.0/routes", headers=HTML).text
     assert "Ignore crafting-table" not in fact and "Mystical Agriculture" not in fact
+
+
+async def _set_constants(constants: dict):
+    import json
+    from sqlalchemy import select
+    async with factory() as s:
+        fa = (await s.execute(select(Game).where(Game.slug == "factorio"))).scalars().one()
+        fa.constants_json = json.dumps(constants)
+        await s.commit()
+
+
+async def test_factory_page_shows_belts_from_game_constants_and_hides_other_mods_belts(client: TestClient, factory_world):
+    await _set_constants({"belts": [{"name": "Yellow belt", "items_per_s": 15, "mod": "base"},
+                                    {"name": "Turbo belt", "items_per_s": 60, "mod": "space-age"}], "beacon": None})
+    page = client.get("/factorio/space/1.0/factory", params={"target": "base:iron-plate", "rate": "900", "per": "min"}, headers=HTML).text
+    assert "Yellow belt" in page and "Turbo belt" not in page          # the scope has no space-age mod
+    assert "1 belt" in page                                           # 900/min = 15/s = one yellow belt (the default pick)
+    off = client.get("/factorio/space/1.0/factory", params={"target": "base:iron-plate", "rate": "900", "ran": "1", "belt": ""}, headers=HTML).text
+    assert "1 belt" not in off and "belts)" not in off and 'value="Yellow belt" selected' not in off
+
+
+async def test_item_page_shows_machine_ratios_for_time_based_games(client: TestClient, factory_world):
+    page = client.get("/factorio/space/1.0/items/base:iron-plate", headers=HTML).text
+    assert "Machine ratios" in page and "Electric furnace" in page and "Iron ore" in page
+    assert "Machine ratios" not in client.get("/minecraft/atm10/1.0/items/minecraft:iron_ingot", headers=HTML).text
