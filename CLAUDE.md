@@ -139,7 +139,7 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    Route search: for throughput games the forward search enters a recipe through ANY item input and routes are
    de-duplicated per recipe (not per machine), so lava -> automation science pack finds the iron-gear branches too.
    `/{game}/{pack}/{version}/factory` (throughput games only) solves the whole tree: cheapest recipe per item (recipes from
-   a non-primary mod carry a big penalty, so base wins where it can), swap any item's recipe via "other ways", pick a machine
+   a non-primary mod carry a big penalty, so base wins where it can; productivity counts, so electromagnetic plants win over assemblers for circuits), swap any item's recipe via "other ways", pick a machine
    tier per type, fill all slots with a module. Rates may be decimals. Not covered: beacons, belts, pollution, fuel for
    burner machines (reported as kW), mining productivity, quality, boilers/spoilage, recycling recipes, fluid temperatures,
    planet `surface_conditions`, resource yield %. Minecraft's upgrade items (speed/energy modules of mods) still have no

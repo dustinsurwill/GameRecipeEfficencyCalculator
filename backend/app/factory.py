@@ -64,14 +64,17 @@ def _candidates(graph: _RecipeGraph, item: str, blocked: set[uuid.UUID]) -> list
 FOREIGN_MOD_PENALTY = 500.0
 
 
-def best_recipes(graph: _RecipeGraph, blocked: set[uuid.UUID]) -> dict[str, _Recipe]:
+def best_recipes(graph: _RecipeGraph, blocked: set[uuid.UUID], settings: Settings | None = None) -> dict[str, _Recipe]:
     """The default recipe for every item: the one with the least total effort per unit, where effort is one
     per recipe step plus what its inputs cost (a mined ore costs 1, a plate smelted from it 2, ...).
     Recipes from mods other than the primary one (the alphabetically first, i.e. the base game) carry a big
     penalty, so they are only chosen where the base game has no way to make the item — otherwise the default
     for iron plate would be a lava foundry and for heavy oil another planet's oil ocean. Source recipes
     (mining, pumping) cost one per unit mined however much a single run yields.
-    Computed by relaxation so loops (coal liquefaction, asteroid reprocessing) cannot trap it."""
+    Productivity counts: a recipe that returns 1.5x per craft (a foundry or electromagnetic plant, or any machine
+    with productivity modules selected) costs a third less per unit, so it wins over the same recipe in a plain
+    machine. Computed by relaxation so loops (coal liquefaction, asteroid reprocessing) cannot trap it."""
+    settings = settings or Settings()
     recipes: dict[uuid.UUID, _Recipe] = {}
     for rs in graph._by_output.values():
         for r in rs:
@@ -89,6 +92,8 @@ def best_recipes(graph: _RecipeGraph, blocked: set[uuid.UUID]) -> dict[str, _Rec
         changed = False
         for r in recipes.values():
             total = 1.0 + (FOREIGN_MOD_PENALTY if r.mod and r.mod != primary else 0.0)
+            tier = pick_tier(r, settings.tier_pref)
+            gain = 1.0 + (module_bonus(r, tier, settings)[1] if tier else 0.0)
             for s in _inputs(r):
                 if not s.item_id:
                     break                                   # tag inputs are not priced
@@ -100,7 +105,7 @@ def best_recipes(graph: _RecipeGraph, blocked: set[uuid.UUID]) -> dict[str, _Rec
                 source = not r.inputs and not r.aux_inputs
                 for o in r.outputs:
                     if o.item_id and o.quantity > 0:
-                        c = total if source else total / o.quantity
+                        c = total if source else total / (o.quantity * gain)
                         if c < cost.get(o.item_id, math.inf) - 1e-9:
                             cost[o.item_id], best[o.item_id] = c, r
                             changed = True
@@ -146,7 +151,7 @@ def solve(
 ) -> dict:
     """`rate` is items per second. Returns rows (target first), totals, raw resources, surplus and warnings."""
     settings = settings or Settings()
-    default = best_recipes(graph, settings.blocked)
+    default = best_recipes(graph, settings.blocked, settings)
     warnings: list[str] = []
 
     def choose(item: str) -> _Recipe | None:

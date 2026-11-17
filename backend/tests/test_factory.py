@@ -134,3 +134,16 @@ def test_built_in_productivity_counts_only_where_the_recipe_allows_it_and_stacks
     prod = Module("Prod", {"productivity": 0.1})
     both = by_item(solve(g, NAMES, "b:plate", 3, Settings(module="Prod", modules={cast.machine.id: {"Prod": prod}})))
     assert abs(both["b:plate"]["productivity"] - 0.9) < 1e-9 and abs(both["b:ore"]["rate"] - 3 / 1.9) < 1e-9
+
+
+def test_default_recipe_prefers_the_machine_with_built_in_productivity():
+    plain = timed(rec("t:plain", "assembler", [("b:ore", 1)], [("b:plate", 1)], key="a-plain"), 1, tiers(("Assembler", 1, 100, 2)), prod=True)
+    foundry = timed(rec("t:cast", "foundry", [("b:ore", 1)], [("b:plate", 1)], key="b-cast"), 1,
+                    [{**tiers(("Foundry", 4, 100, 4))[0], "base_productivity": 0.5}], prod=True)
+    ore = timed(rec("t:mine", "drill", [], [("b:ore", 1)]), 1, tiers(("Drill", 1, 1, 0)))
+    row = by_item(solve(graph(plain, foundry, ore), NAMES, "b:plate", 3))["b:plate"]
+    assert row["machine"] == "foundry"
+    # a recipe that does not allow productivity gets no such edge: the first (plain) one stays the default
+    foundry.allow_productivity = False
+    row = by_item(solve(graph(plain, foundry, ore), NAMES, "b:plate", 3))["b:plate"]
+    assert row["machine"] == "assembler"
