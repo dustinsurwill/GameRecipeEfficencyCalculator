@@ -20,6 +20,7 @@ from app.api.v1.routes import chains
 from app.db import get_session
 from app.discovery import service
 from app.discovery.index import DiscoveryIndex
+from app.models.versioning import Game
 from app.discovery.scope import (
     Scope, ScopeNotFound, get_game, list_games, list_packs, list_versions,
 )
@@ -283,6 +284,7 @@ async def routes_page(
     session: AsyncSession = Depends(get_session),
     target: str = "", start: str = "", depth: int = Query(6, ge=1, le=10), crafting: str = "", ran: str = "", rank: str = "auto",
     xm: list[str] = Query([]), xmod: list[str] = Query([]), xi: list[str] = Query([]),
+    rate: float = Query(0, ge=0, le=1_000_000), per: str = "min",
 ):
     # `ran` marks a submitted form: an unchecked box then means "include", and empty skip lists mean "skip nothing".
     skip_crafting = bool(crafting) if ran else True
@@ -293,6 +295,8 @@ async def routes_page(
              if (c := _skip_chip(idx, kind, v))]
     sel_target = idx.by_item_id.get(target)
     sel_start = idx.by_item_id.get(start)
+    per = per if per in ("s", "min") else "min"
+    throughput = (await session.get(Game, scope.game_id)).recipe_metric == "throughput"
     result, error = None, None
     if ran and not sel_target:
         error = "Pick the item you want to make."
@@ -306,6 +310,7 @@ async def routes_page(
                 exclude_machine=pick("machine"), exclude_item=pick("item"), exclude_mod=pick("mod"),
                 rank=rank if rank in ('yield', 'simple') else 'auto',
                 allow_cycles=False, max_depth=depth, limit=25, quantity=1.0,
+                rate=(rate / 60 if per == "min" else rate) if throughput and rate else None,
             )
         except HTTPException as e:
             error = str(e.detail)
@@ -313,6 +318,7 @@ async def routes_page(
     return render(
         request, "routes.html", scope=scope, target=sel_target, start=sel_start, depth=depth,
         skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed, rank=rank,
+        throughput=throughput, rate=rate or "", per=per,
     )
 
 

@@ -114,10 +114,26 @@ def test_routes_needing_other_items_rank_below_self_contained_ones_in_yield_mode
     assert [c[0][0][0].machine.id for c in ranked] == ["mp", "ms"]
 
 
-def test_a_recipe_with_nothing_to_follow_makes_its_output_a_starting_point():
+def test_a_recipe_that_needs_nothing_is_a_source_step():
+    # mining drills / offshore pumps: the route ends in the source recipe itself
     spawn = rec("t:spawn", "spawner", [], [("goal:g", 1)])
     use = rec("t:use", "m", [("goal:g", 1)], [("final:f", 1)])
     ranked = back(graph(spawn, use), "final:f", _Excluder())
+    assert [([r.machine.id for r, _ in c[0]], c[3]) for c in ranked] == [(["spawner", "m"], "goal:g")]
+
+
+def test_a_source_does_not_hide_the_routes_that_make_the_item_from_something():
+    mine = rec("b:mining", "drill", [], [("b:ore", 1)])
+    crush = rec("sa:crushing", "crusher", [("sa:chunk", 1)], [("b:ore", 2)])
+    smelt = rec("b:smelting", "furnace", [("b:ore", 1)], [("b:plate", 1)])
+    ranked = back(graph(mine, crush, smelt), "b:plate", _Excluder())
+    assert {tuple(r.machine.id for r, _ in c[0]) for c in ranked} == {("drill", "furnace"), ("crusher", "furnace")}
+
+
+def test_a_recipe_with_only_catalysts_is_still_nothing_to_follow():
+    cast = rec("t:cast", "caster", [], [("goal:g", 1)], aux=[("t:mold", 1)])
+    use = rec("t:use", "m", [("goal:g", 1)], [("final:f", 1)])
+    ranked = back(graph(cast, use), "final:f", _Excluder())
     assert [(len(c[0]), c[3]) for c in ranked] == [(1, "goal:g")]
 
 
@@ -178,3 +194,35 @@ def test_forward_search_prunes_branches_that_cannot_reach_the_target():
         assert len(found) == 1
         visits.append(b.left)
     assert visits[1] > visits[0]      # fewer nodes spent when pruned
+
+
+def test_throughput_counts_machines_per_wanted_rate():
+    from app.api.v1.routes.chains import _build_chain_dict
+    mine = rec("b:mining-basic-solid", "drill", [], [("b:ore", 1)])
+    mine.time_ticks = 60                                    # 1 s per ore
+    mine.machine.tiers = [{"name": "Electric mining drill", "speed": 0.5, "categories": ["mining-basic-solid"]},
+                          {"name": "Pumpjack", "speed": 1, "categories": ["mining-basic-fluid"]}]
+    smelt = rec("b:smelting", "furnace", [("b:ore", 1)], [("b:plate", 1)])
+    smelt.time_ticks = 192                                  # 3.2 s
+    smelt.machine.tiers = [{"name": "Stone furnace", "speed": 1, "categories": ["smelting"]},
+                           {"name": "Electric furnace", "speed": 2, "categories": ["smelting"]}]
+    out = _build_chain_dict(
+        steps=[(mine, 1.0), (smelt, 1.0)], item_to_canonical={}, quantity_scale=1.0, rank=1, has_cycle=False,
+        cycle_at_step=None, yield_per_start_item=None, raw_materials_per_target=1.0,
+        raw_inputs=[{"item_id": "b:ore", "quantity": 1.0}], final_outputs=[{"item_id": "b:plate", "quantity": 1.0}],
+        rate=10.0,                                          # 10 plates / s
+    )
+    drill_step, furnace_step = out["steps"]
+    assert drill_step["crafts_per_second"] == 10
+    # only the drill that mines this category is offered; 10 ore/s / (0.5 ore/s each) = 20
+    assert [(m["name"], m["needed"]) for m in drill_step["machines"]] == [("Electric mining drill", 20)]
+    assert [(m["name"], m["count"], m["needed"]) for m in furnace_step["machines"]] == [
+        ("Stone furnace", 32.0, 32), ("Electric furnace", 16.0, 16)]
+    assert out["raw_inputs"][0]["per_second"] == 10
+    # without a rate there are no machine counts, but the recipe time is still reported
+    plain = _build_chain_dict(
+        steps=[(smelt, 1.0)], item_to_canonical={}, quantity_scale=1.0, rank=1, has_cycle=False, cycle_at_step=None,
+        yield_per_start_item=None, raw_materials_per_target=1.0, raw_inputs=[],
+        final_outputs=[{"item_id": "b:plate", "quantity": 1.0}],
+    )
+    assert plain["steps"][0]["seconds_per_craft"] == 3.2 and "machines" not in plain["steps"][0]

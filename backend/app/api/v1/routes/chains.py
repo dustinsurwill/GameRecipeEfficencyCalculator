@@ -55,6 +55,8 @@ class _Slot:
 class _MachineInfo:
     id: str
     name: str
+    # machines that can run this machine's recipes: [{"name", "speed", "categories", "mod"}], slowest first
+    tiers: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -159,6 +161,23 @@ async def _mod_version_ids_for_modpack(
     return {link.mod_version_id for link in result.scalars().all()}
 
 
+def _scoped_tiers(raw: str | None, namespaces: set[str]) -> list[dict]:
+    """A machine's speed tiers, minus machines added by mods that are not in this scope."""
+    if not raw:
+        return []
+    try:
+        tiers = json.loads(raw)
+    except ValueError:
+        return []
+    return [t for t in tiers if not t.get("mod") or t["mod"] in namespaces]
+
+
+def _tiers_for(recipe: _Recipe) -> list[dict]:
+    """Machines that can actually run this recipe (a recipe type's suffix is its crafting category)."""
+    category = recipe.recipe_type.partition(":")[2]
+    return [t for t in recipe.machine.tiers if not t.get("categories") or category in t["categories"]]
+
+
 async def _load_recipe_graph(
     session: AsyncSession,
     mod_version_ids: set[uuid.UUID],
@@ -206,8 +225,11 @@ async def _load_recipe_graph(
     )
 
     machine_result = await session.exec(select(MachineIdentity))
+    scope_namespaces = set((await session.exec(
+        select(Mod.namespace).join(ModVersion, ModVersion.mod_id == Mod.id).where(ModVersion.id.in_(mod_version_ids))
+    )).scalars().all())
     machine_map: dict[uuid.UUID, _MachineInfo] = {
-        m.id: _MachineInfo(id=str(m.id), name=m.name)
+        m.id: _MachineInfo(id=str(m.id), name=m.name, tiers=_scoped_tiers(m.speed_tiers_json, scope_namespaces))
         for m in machine_result.scalars().all()
     }
 
@@ -599,6 +621,13 @@ def _backward_dfs(
 
             runs = quantity / (out_slot.quantity or 1.0)
 
+            if not recipe.inputs and not recipe.aux_inputs:
+                # a source (mining drill, offshore pump): it needs nothing, so the route ends here
+                expanded = True
+                all_chains.append((list(reversed(steps_rev + [(recipe, runs)])), False, None, item_id, quantity))
+                budget.add_chain()
+                continue
+
             for in_slot in recipe.gin:
                 if in_slot.item_id:
                     input_items = [in_slot.item_id]
@@ -739,6 +768,7 @@ def _serialize_forward_chain(
     has_cycle: bool,
     cycle_at_step: int | None,
     rank: int,
+    rate: float | None = None,
 ) -> dict[str, Any]:
     # raw_inputs: non-fluid inputs of step 1
     recipe0, runs0 = steps[0]
@@ -777,6 +807,7 @@ def _serialize_forward_chain(
         raw_materials_per_target=None,
         raw_inputs=raw_inputs,
         final_outputs=final_outputs,
+        rate=rate,
     )
 
 
@@ -790,6 +821,7 @@ def _serialize_backward_chain(
     raw_item_id: str,
     raw_qty: float,
     rank: int,
+    rate: float | None = None,
 ) -> dict[str, Any]:
     raw_inputs = [
         {
@@ -823,6 +855,7 @@ def _serialize_backward_chain(
         raw_materials_per_target=raw_qty * quantity_scale if not has_cycle else None,
         raw_inputs=raw_inputs,
         final_outputs=final_outputs,
+        rate=rate,
     )
 
 
@@ -837,8 +870,12 @@ def _build_chain_dict(
     raw_materials_per_target: float | None,
     raw_inputs: list[dict],
     final_outputs: list[dict],
+    rate: float | None = None,
 ) -> dict[str, Any]:
     serialized_steps = []
+    # Throughput: `runs` already balances every step for the route's output, so crafts per output item
+    # is runs / output; with a wanted rate (items per second) that gives crafts per second per step.
+    target_qty = sum(f["quantity"] for f in final_outputs)
     machines_seen: dict[str, dict] = {}
     chemicals: list[str] = []
 
@@ -891,7 +928,7 @@ def _build_chain_dict(
             if id(s) not in followed
         ]
 
-        serialized_steps.append({
+        step_dict = {
             "step": i + 1,
             "machine": machine_dict,
             "recipe_id": str(recipe.id),
@@ -900,10 +937,32 @@ def _build_chain_dict(
             "aux_inputs": step_aux,
             "time_ticks": recipe.time_ticks,
             "energy_rf": recipe.energy_rf,
-        })
+        }
+        tiers = _tiers_for(recipe) if recipe.time_ticks else []
+        if tiers and target_qty > 0:
+            seconds = recipe.time_ticks / 60
+            crafts_per_output = runs * quantity_scale / target_qty
+            step_dict["seconds_per_craft"] = seconds
+            step_dict["crafts_per_output"] = crafts_per_output
+            if rate:
+                crafts_per_second = crafts_per_output * rate
+                step_dict["crafts_per_second"] = crafts_per_second
+                step_dict["machines"] = [
+                    {
+                        "name": t["name"], "speed": t["speed"],
+                        "count": crafts_per_second * seconds / t["speed"],
+                        "needed": math.ceil(crafts_per_second * seconds / t["speed"] - 1e-9),
+                    }
+                    for t in tiers
+                ]
+        serialized_steps.append(step_dict)
+
+    if rate and target_qty > 0:
+        raw_inputs = [{**r, "per_second": r["quantity"] / target_qty * rate} for r in raw_inputs]
 
     return {
         "rank": rank,
+        "rate": rate,
         "yield_per_start_item": yield_per_start_item,
         "raw_materials_per_target": raw_materials_per_target,
         "has_cycle": has_cycle,
@@ -1143,6 +1202,10 @@ async def get_chains(
     max_depth: int = Query(default=8, ge=1, le=12),
     limit: int = Query(default=50, ge=1, le=200),
     quantity: float = Query(default=1.0, gt=0.0),
+    rate: float | None = Query(
+        default=None, gt=0.0,
+        description="Wanted output in items per second; adds crafts/s and machine counts to every step",
+    ),
 ) -> dict[str, Any]:
 
     mod_version_ids, scope_info = await _resolve_scope(
@@ -1194,6 +1257,7 @@ async def get_chains(
                 has_cycle=has_cycle,
                 cycle_at_step=cycle_step,
                 rank=i + 1,
+                rate=rate,
             )
             for i, (chain, has_cycle, cycle_step) in enumerate(paged)
         ]
@@ -1226,6 +1290,7 @@ async def get_chains(
                 raw_item_id=raw_item,
                 raw_qty=raw_qty,
                 rank=i + 1,
+                rate=rate,
             )
             for i, (chain, has_cycle, cycle_step, raw_item, raw_qty) in enumerate(paged_b)
         ]

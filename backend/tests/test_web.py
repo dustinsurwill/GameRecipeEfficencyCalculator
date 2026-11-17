@@ -83,6 +83,18 @@ async def seeded():
             RecipeSlot(recipe_id=rec.id, slot_type="output", item_appearance_id=apps[1].id),
             RecipeModVersionLink(recipe_id=rec.id, mod_version_id=mv_mek.id),
         ])
+        # a recipe whose type prefix is not a mod id (as in Factorio's `crafting`) still counts for its mod
+        press = MachineIdentity(game_id=mc.id, name="Press", recipe_types_json='["tool:press"]')
+        s.add(press)
+        await s.flush()
+        rec2 = Recipe(machine_identity_id=press.id, recipe_type="tool:press", import_key="r2", status=RecipeStatus.APPROVED)
+        s.add(rec2)
+        await s.flush()
+        s.add_all([
+            RecipeSlot(recipe_id=rec2.id, slot_type="input", item_appearance_id=apps[0].id),
+            RecipeSlot(recipe_id=rec2.id, slot_type="output", item_appearance_id=apps[2].id),
+            RecipeModVersionLink(recipe_id=rec2.id, mod_version_id=mv_new.id),
+        ])
         await s.commit()
 
 
@@ -245,3 +257,10 @@ def test_json_api_refresh_token_roundtrip(client: TestClient):
     """Regression: refresh rows used aware datetimes (Postgres rejected them) and returned Rows."""
     client.post("/api/v1/auth/register", json={"display_name": "Json User", "email": "j@example.com", "password": "password123"})
     assert client.post("/api/v1/auth/login", json={"email": "j@example.com", "password": "password123"}).status_code == 200
+
+
+async def test_mod_recipe_counts_use_the_owning_mod_not_the_type_prefix(client: TestClient, seeded):
+    mods = {m["namespace"]: m for m in client.get("/api/v1/discover/minecraft/atm10/2.0/mods").json()["items"]}
+    assert mods["mekanism"]["recipe_count"] == 1
+    assert mods["newmod"]["recipe_count"] == 1          # its recipe's type is `tool:press`
+    assert "Press" in client.get("/minecraft/atm10/2.0/machines", headers=HTML).text

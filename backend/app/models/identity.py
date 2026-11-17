@@ -113,6 +113,10 @@ class MachineIdentity(TimestampMixin, table=True):
     recipe_types_json: str = Field(default="[]")
     # Whether this machine processes items per-unit or per-time
     is_time_based: bool = Field(default=False)
+    # Machines that can run this machine's recipes, fastest last, as JSON:
+    # [{"name": "Assembling machine 2", "speed": 0.75, "categories": ["crafting", ...]}, ...]
+    # `speed` multiplies how fast a recipe's time passes; null/empty = no throughput data.
+    speed_tiers_json: str | None = None
     icon_url: str | None = None
 
     upgrade_items: list["MachineUpgradeItem"] = Relationship(
@@ -199,6 +203,7 @@ class MachineIdentityRead(SQLModel):
     name: str
     recipe_types_json: str
     is_time_based: bool
+    speed_tiers_json: str | None = None
     icon_url: str | None
 
 

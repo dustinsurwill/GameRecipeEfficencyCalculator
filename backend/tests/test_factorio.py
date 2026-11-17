@@ -1,5 +1,5 @@
 """Factorio recipe conversion (no database, no game install needed)."""
-from app.importer.factorio import convert_recipes
+from app.importer.factorio import convert_recipes, mining_recipes, speed_tiers
 
 
 def convert(*raw):
@@ -14,7 +14,7 @@ def test_plain_crafting_recipe():
     [r] = convert({"name": "iron-gear-wheel", "energy_required": 0.5,
                    "ingredients": [{"type": "item", "name": "iron-plate", "amount": 2}],
                    "results": [{"type": "item", "name": "iron-gear-wheel", "amount": 1}]})
-    assert r.type == "factorio:crafting" and r.machine == "Assembling Machine"
+    assert r.type == "base:crafting" and r.machine == "Assembling Machine"
     assert r.time_ticks == 30
     assert sig(r.inputs) == [("base:iron-plate", 2, False)]
     assert sig(r.outputs) == [("base:iron-gear-wheel", 1, False)]
@@ -65,3 +65,57 @@ def test_skips_parameter_hidden_and_empty_recipes():
          "results": [{"type": "item", "name": "b", "amount": 1}]},
         {"name": "egg", "results": [{"type": "item", "name": "biter-egg", "amount": 1}]},
     ) == []
+
+
+def test_recipe_craftable_in_two_machines_is_stored_once_per_machine():
+    # Space Age adds the electromagnetics category to circuits: assembling machine OR electromagnetic plant
+    rs = convert({"name": "electronic-circuit", "categories": ["crafting", "electromagnetics"],
+                  "ingredients": [{"type": "item", "name": "iron-plate", "amount": 1}],
+                  "results": [{"type": "item", "name": "electronic-circuit", "amount": 1}]})
+    assert [(r.machine, r.type, r.id.rsplit("/", 1)[-1]) for r in rs] == [
+        ("Assembling Machine", "base:crafting", "electronic-circuit"),
+        ("Electromagnetic Plant", "base:electromagnetics", "electronic-circuit@electromagnetics"),
+    ]
+
+
+def test_several_categories_of_one_machine_collapse_and_hand_crafting_is_ignored():
+    rs = convert({"name": "x", "categories": ["crafting", "advanced-crafting", "hand-crafting"],
+                  "ingredients": [{"type": "item", "name": "a", "amount": 1}],
+                  "results": [{"type": "item", "name": "b", "amount": 1}]})
+    assert [r.machine for r in rs] == ["Assembling Machine"]
+
+
+def test_mining_pumping_and_fluid_requirements():
+    owner = lambda name: "base"  # noqa: E731
+    resources = [
+        {"name": "iron-ore", "__mod": "base", "minable": {"result": "iron-ore", "mining_time": 1}},
+        {"name": "uranium-ore", "__mod": "base", "minable": {"result": "uranium-ore", "mining_time": 2,
+                                                              "required_fluid": "sulfuric-acid", "fluid_amount": 10}},
+        {"name": "crude-oil", "__mod": "base", "category": "basic-fluid",
+         "minable": {"mining_time": 1, "results": [{"type": "fluid", "name": "crude-oil", "amount": 10}]}},
+        {"name": "decoration", "__mod": "base", "minable": {}},
+    ]
+    tiles = [{"name": "water", "fluid": "water"}, {"name": "deepwater", "fluid": "water"},
+             {"name": "lava", "fluid": "lava"}, {"name": "grass"}]
+    rs = {r.id.rsplit("/", 1)[-1]: r for r in mining_recipes(resources, tiles, "base", owner)}
+    assert sorted(rs) == ["crude-oil", "iron-ore", "lava", "uranium-ore", "water"]   # one pump recipe per fluid
+    assert (rs["iron-ore"].machine, rs["iron-ore"].time_ticks, rs["iron-ore"].inputs) == ("Mining Drill", 60, [])
+    assert sig(rs["uranium-ore"].aux_inputs) == [("base:sulfuric-acid", 10, True)]
+    assert rs["uranium-ore"].time_ticks == 120
+    assert (rs["crude-oil"].machine, sig(rs["crude-oil"].outputs)) == ("Pumpjack", [("base:crude-oil", 10, True)])
+    assert (rs["water"].machine, rs["water"].type) == ("Offshore Pump", "base:offshore-pumping")
+
+
+def test_speed_tiers_follow_categories_and_sort_slowest_first():
+    data = {
+        "assembling-machine": [
+            {"name": "assembling-machine-3", "__mod": "base", "crafting_speed": 1.25, "crafting_categories": ["crafting"]},
+            {"name": "assembling-machine-1", "__mod": "base", "crafting_speed": 0.5, "crafting_categories": ["crafting"]},
+            {"name": "electromagnetic-plant", "__mod": "space-age", "crafting_speed": 2, "crafting_categories": ["electromagnetics"]},
+        ],
+        "mining-drill": [{"name": "pumpjack", "__mod": "base", "mining_speed": 1, "resource_categories": ["basic-fluid"]}],
+    }
+    tiers = speed_tiers(data, {"assembling-machine-1": "Assembling machine 1"})
+    assert [(t["name"], t["speed"]) for t in tiers["Assembling Machine"]] == [("Assembling machine 1", 0.5), ("Assembling machine 3", 1.25)]
+    assert tiers["Electromagnetic Plant"][0]["mod"] == "space-age"
+    assert tiers["Pumpjack"][0]["categories"] == ["mining-basic-fluid"]

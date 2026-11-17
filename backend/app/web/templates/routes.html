@@ -5,7 +5,7 @@
   {%- set label = s.canonical_name or ((s.item_id|replace('fluid:', '')|replace('chemical:', '')).split(':')[1].replace('_', ' ')|title if s.item_id else (('Any ' ~ (s.tag|tag_label)) if s.tag else 'Fluid / chemical')) -%}
   <div class="slotline">
     {{ m.tile(label, (s.item_id or s.tag or '')|ns_of, 24, tag=(not s.item_id and s.tag), fluid=s.is_fluid) }}
-    <span class="qty">{{ s.quantity|qty }}{{ ' mB' if s.is_fluid }}{{ '' if s.is_fluid else '×' }}</span>
+    <span class="qty">{{ s.quantity|qty }}{{ ('' if throughput else ' mB') if s.is_fluid }}{{ '' if s.is_fluid else '×' }}</span>
     {% if s.item_id %}<a class="u" href="{{ scope.url('/items/' ~ (s.item_id|urlq)) }}">{{ label }}</a>{% else %}<span>{{ label }}</span>{% endif %}
   </div>
 {%- endmacro %}
@@ -22,6 +22,15 @@
       <div class="field"><span>Start with <span class="field-hint">· optional</span></span>{% with which='start', item=start %}{% include "partials/picker.html" %}{% endwith %}</div>
       <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
     </div>
+    {% if throughput %}
+    <div class="field" style="max-width:24rem">
+      <span>How much do you need? <span class="field-hint">· optional — shows how many machines</span></span>
+      <div class="row">
+        <input type="number" name="rate" min="0" step="any" value="{{ rate }}" placeholder="e.g. 60" aria-label="Wanted output rate" style="max-width:9rem">
+        <select name="per" aria-label="Rate unit"><option value="min" {{ 'selected' if per == 'min' }}>items / minute</option><option value="s" {{ 'selected' if per == 's' }}>items / second</option></select>
+      </div>
+    </div>
+    {% endif %}
     <details class="adv" {{ 'open' if advanced_open }}>
       <summary>Advanced options <span class="muted small">· skipping {{ skips|length + (1 if skip_crafting else 0) }}{% if skip_crafting %} (incl. crafting tables){% endif %}</span></summary>
       <div class="stack" style="gap:.9rem;padding-top:.75rem">
@@ -79,9 +88,16 @@
             {% elif chain.raw_materials_per_target is not none %}<b>{{ '%.2f'|format(chain.raw_materials_per_target) }}</b> raw per item{% endif %}
           </span>
         </header>
+        {% if chain.rate and chain.raw_inputs %}<p class="small muted" style="padding:0 1rem .5rem">At {{ (chain.rate * 60)|qty }} per minute you need {% for r in chain.raw_inputs %}{{ (r.per_second * 60)|qty }}/min {{ (r.canonical_name or (r.item_id or '').split(':')[-1].replace('-', ' '))|lower }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
         {% for step in chain.steps %}
         <div class="route-step">
-          <div class="small"><span class="muted num">{{ step.step }}.</span> <a class="bold u" href="{{ scope.url('/machines/' ~ step.machine.id) }}">{{ step.machine.name }}</a></div>
+          <div class="small"><span class="muted num">{{ step.step }}.</span> <a class="bold u" href="{{ scope.url('/machines/' ~ step.machine.id) }}">{{ step.machine.name }}</a>
+            {% if step.seconds_per_craft is defined %}<div class="muted xs">{{ step.seconds_per_craft|qty }} s per craft</div>{% endif %}
+            {% if step.machines %}
+            <div class="muted xs" style="margin-top:.25rem">{{ step.crafts_per_second|qty }} crafts/s needs</div>
+            <div style="display:flex;flex-wrap:wrap;gap:.25rem;margin-top:.15rem">{% for mc in step.machines %}<span class="badge" title="{{ mc.count|qty }} machines of crafting speed {{ mc.speed|qty }}">{{ mc.needed }}× {{ mc.name }}</span>{% endfor %}</div>
+            {% endif %}
+          </div>
           <div>{% for s in step.inputs + step.aux_inputs %}{{ slotline(s) }}{% endfor %}</div>
           <div>{% for s in step.outputs %}{{ slotline(s) }}{% endfor %}</div>
         </div>

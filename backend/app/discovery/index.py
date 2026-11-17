@@ -22,7 +22,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app import memory
 from app.discovery.scope import Scope
 from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
-from app.models.recipe import Recipe, RecipeSlot
+from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
 from app.models.status import RecipeStatus
 from app.models.versioning import Mod, ModVersion
 
@@ -81,13 +81,19 @@ class DiscoveryIndex:
         ix.recipe_total = (await session.exec(
             select(func.count()).select_from(Recipe).where(in_scope)
         )).scalar_one()
-        type_counts = (await session.exec(
-            select(Recipe.recipe_type, func.count()).where(in_scope).group_by(Recipe.recipe_type)
+        # per mod = recipes that belong to one of the mod's versions in this scope. (Counting by the
+        # recipe type's prefix is wrong: a type prefix is not always a mod id, and a mod's recipes
+        # often use another mod's types, e.g. minecraft:crafting_shaped.)
+        owner_counts = (await session.exec(
+            select(Mod.namespace, func.count(func.distinct(Recipe.id)))
+            .select_from(Recipe)
+            .join(RecipeModVersionLink, RecipeModVersionLink.recipe_id == Recipe.id)
+            .join(ModVersion, ModVersion.id == RecipeModVersionLink.mod_version_id)
+            .join(Mod, Mod.id == ModVersion.mod_id)
+            .where(in_scope, RecipeModVersionLink.mod_version_id.in_(scope.mod_version_ids))
+            .group_by(Mod.namespace)
         )).all()
-        recipes_per_ns: dict[str, int] = {}
-        for rtype, n in type_counts:
-            ns = _namespace_of(rtype)
-            recipes_per_ns[ns] = recipes_per_ns.get(ns, 0) + n
+        recipes_per_ns: dict[str, int] = dict(owner_counts)
 
         machine_counts = dict((await session.exec(
             select(Recipe.machine_identity_id, func.count()).where(in_scope).group_by(Recipe.machine_identity_id)
