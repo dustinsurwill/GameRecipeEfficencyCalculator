@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import contrib
 from app.auth.tokens import TokenData, get_current_token_data
 from app.db import get_session
 from app.models.admin import AdminRole, AdminScopeType, is_mod_admin, is_modpack_admin
@@ -94,6 +95,15 @@ async def create_game(body: GameCreate, session: Session, token: Token) -> Game:
     await session.commit()
     await session.refresh(game)
     return game
+
+
+@router.post("/machines", response_model=MachineIdentityRead, status_code=status.HTTP_201_CREATED)
+async def create_machine(body: contrib.MachineCreate, session: Session, token: Token) -> MachineIdentity:
+    """Add a machine to a game. Curators and superusers only."""
+    try:
+        return await contrib.create_machine(session, token, body)
+    except contrib.ContribError as e:
+        raise HTTPException(e.status_code, str(e))
 
 
 @router.get("/games/{game_id}", response_model=GameRead)

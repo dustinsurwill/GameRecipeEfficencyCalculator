@@ -367,25 +367,25 @@ async def _purge() -> None:
     async with async_session_factory() as session:
         async with session.begin():
             keyed = select(Recipe.id).where(Recipe.import_key.like("factorio/%"))
-            await session.execute(delete(RecipeSlot).where(RecipeSlot.recipe_id.in_(keyed)))
-            await session.execute(delete(RecipeModVersionLink).where(RecipeModVersionLink.recipe_id.in_(keyed)))
-            await session.execute(delete(Recipe).where(Recipe.import_key.like("factorio/%")))
-            game = (await session.execute(select(Game).where(Game.slug == "factorio"))).scalars().one_or_none()
+            await session.exec(delete(RecipeSlot).where(RecipeSlot.recipe_id.in_(keyed)))
+            await session.exec(delete(RecipeModVersionLink).where(RecipeModVersionLink.recipe_id.in_(keyed)))
+            await session.exec(delete(Recipe).where(Recipe.import_key.like("factorio/%")))
+            game = (await session.exec(select(Game).where(Game.slug == "factorio"))).scalars().one_or_none()
             if game is None:
                 return
             # a pack's mod versions are re-linked on import (the Space Age pack gets its own base version)
             pack_versions = select(ModPackVersion.id).join(
                 ModPackIdentity, ModPackIdentity.id == ModPackVersion.identity_id
             ).where(ModPackIdentity.game_id == game.id)
-            await session.execute(delete(ModPackModVersion).where(ModPackModVersion.modpack_id.in_(pack_versions)))
+            await session.exec(delete(ModPackModVersion).where(ModPackModVersion.modpack_id.in_(pack_versions)))
             mod_versions = select(ModVersion.id).join(Mod, Mod.id == ModVersion.mod_id).where(Mod.game_id == game.id)
             used = select(RecipeSlot.item_appearance_id).where(RecipeSlot.item_appearance_id.is_not(None))
-            await session.execute(
+            await session.exec(
                 delete(ItemAppearance).where(ItemAppearance.mod_version_id.in_(mod_versions),
                                              ItemAppearance.id.not_in(used))
             )
             has_recipes = exists().where(Recipe.machine_identity_id == MachineIdentity.id)
-            await session.execute(
+            await session.exec(
                 delete(MachineIdentity).where(MachineIdentity.game_id == game.id, ~has_recipes)
             )
 
@@ -396,8 +396,8 @@ async def _apply_display_names(names: dict[str, str]) -> int:
     changed = 0
     async with async_session_factory() as session:
         async with session.begin():
-            game = (await session.execute(select(Game).where(Game.slug == "factorio"))).scalars().one()
-            rows = (await session.execute(select(ItemIdentity).where(ItemIdentity.game_id == game.id))).scalars().all()
+            game = (await session.exec(select(Game).where(Game.slug == "factorio"))).scalars().one()
+            rows = (await session.exec(select(ItemIdentity).where(ItemIdentity.game_id == game.id))).scalars().all()
             for ident in rows:
                 item_id = (ident.notes or "").removeprefix("item_id:").removeprefix("fluid:")
                 name = names.get(item_id.partition(":")[2])
@@ -413,12 +413,12 @@ async def _apply_display_names(names: dict[str, str]) -> int:
 async def _apply_machine_data(tiers: dict[str, list[dict]]) -> None:
     async with async_session_factory() as session:
         async with session.begin():
-            game = (await session.execute(select(Game).where(Game.slug == "factorio"))).scalars().one()
-            await session.execute(
+            game = (await session.exec(select(Game).where(Game.slug == "factorio"))).scalars().one()
+            await session.exec(
                 update(MachineIdentity).where(MachineIdentity.game_id == game.id).values(is_time_based=True)
             )
             for name, lst in tiers.items():
-                await session.execute(
+                await session.exec(
                     update(MachineIdentity)
                     .where(MachineIdentity.game_id == game.id, MachineIdentity.name == name)
                     .values(speed_tiers_json=json.dumps(lst))

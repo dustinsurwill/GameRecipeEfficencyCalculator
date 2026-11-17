@@ -20,6 +20,7 @@ from app import memory
 from app.config import get_settings
 from app.web.account import router as account_router
 from app.web.admin import router as web_admin_router
+from app.web.contribute import router as contribute_router
 from app.web.deps import LoginRequired
 from app.web.pages import router as pages_router
 from app.web.templating import render
@@ -84,6 +85,7 @@ async def healthz() -> dict:
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "static"), name="static")
 app.include_router(account_router)
 app.include_router(web_admin_router)
+app.include_router(contribute_router)
 app.include_router(pages_router)
 
 _CSP = (

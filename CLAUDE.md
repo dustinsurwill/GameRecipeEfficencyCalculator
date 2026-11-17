@@ -20,14 +20,16 @@ Reference docs: [Database schema + tech stack + env vars](docs/schema.md) · [Ar
 │   │   ├── auth/            # password.py, tokens.py, refresh.py, oauth.py
 │   │   ├── models/          # __init__.py imports ALL models in FK order (required by Alembic)
 │   │   ├── importer/pipeline.py   # KubeJS export ingestion CLI + shared `import_recipes()`
-│   │   ├── importer/factorio.py   # Factorio: reads recipe Lua from an installed game (needs `lua5.4`)
+│   │   ├── importer/factorio.py + factorio_data.lua  # Factorio: Lua sandbox reads recipes/machines/resources from an install (needs `lua5.4`)
+│   │   ├── contrib.py       # hand entry rules: create item / machine / recipe (API + /contribute share it)
+│   │   ├── cli.py           # `python -m app.cli promote <email> --superuser|--curator`
 │   │   ├── discovery/
 │   │   │   ├── scope.py     # Scope = game + modpack + version -> set of mod_version_ids
 │   │   │   ├── index.py     # in-memory DiscoveryIndex, one per scope (max 2 cached)
 │   │   │   └── service.py   # queries shared by the JSON API and the HTML pages
 │   │   ├── api/v1/routes/   # JSON API: auth, users, admin, catalog, chains, discover, recipes
 │   │   └── web/             # server-rendered site (Jinja2 + HTMX)
-│   │       ├── pages.py, account.py, admin.py   # routes
+│   │       ├── pages.py, account.py, admin.py, contribute.py   # routes (/contribute = hand-entry forms)
 │   │       ├── deps.py      # scope/index deps, cookie session, CSRF (Origin) check
 │   │       ├── templating.py, templates/        # Jinja2 env + helpers; templates/partials = HTMX fragments
 │   │       └── static/      # css/app.css (hand-written), js/htmx.min.js (vendored, pinned), js/app.js
@@ -66,6 +68,8 @@ uv run pytest tests/ -v     # SQLite in-memory, no Postgres needed
 DEBUG=false uv run python -m app.importer --export-dir ../allthemons_export
 # Factorio (Vanilla = base, Space Age = base + space-age + quality + elevated-rails); Steam path is the default
 DEBUG=false uv run python -m app.importer.factorio [--factorio-dir ~/.local/share/Steam/steamapps/common/Factorio]
+# Become able to edit the catalog / publish recipes (register on the site first)
+uv run python -m app.cli promote you@example.com --superuser
 ```
 
 > **uv note:** `alembic` and `uvicorn` are only on the uv venv PATH — always prefix with `uv run`.
@@ -116,13 +120,19 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    `import_key` already exists, so after parser changes `TRUNCATE recipe_slots, recipe_mod_version_links, recipes CASCADE` and re-import.
    Route quality: items whose only producers are excluded (crafting) count as "raw" (e.g. armor -> ingot recycling).
 2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
-3. **Recipe submission** — there is NO create endpoint yet (`/api/v1/recipes` only has get/submit/review/retract for
-   existing drafts), so community recipes can't be entered by hand. Needs `POST /api/v1/recipes` + a page.
+3. **Hand entry** — done: `POST /api/v1/{recipes,items,machines}` + `/contribute` forms (recipe: any user, curators publish at
+   once, others go to the review queue; item: curator/mod admin; machine: curator; catalog: superuser). Missing: editing or
+   deleting what was entered, tag creation, a typeahead for item fields (they take ids or exact names), bulk entry.
 4. **Email wiring** — fastapi-mail for verification and password reset.
 5. **tags_json → Postgres ARRAY** — migration + GIN index. Tag member lists only include items seen in recipes.
 6. **Admin scope ids** — mod/modpack admin memberships use the *identity* id; `Recipe.modpack_id` and review
    checks still compare against version ids. Unify.
-7. **Factorio gaps** — imported from the game's Lua (312 recipes; catalysts netted out, chances as expected values; ids
-   `base:iron-plate`, `fluid:base:water`, water is free). Not covered: mining/boilers/offshore pumps, spoilage, recycling
-   recipes (generated at load time), `data-updates` tweaks, fluid temperatures, planet `surface_conditions`, and
-   throughput (`time_ticks` is stored but chains ignore it — see docs/architecture.md TODO 7).
+7. **Factorio** — imported from the game's Lua by `importer/factorio.py` (re-running replaces everything keyed `factorio/`).
+   Two packs: Vanilla (base) and Space Age (+ space-age/quality/elevated-rails; Space Age's `base-data-updates.lua` is
+   applied, so base is a separate mod version "x (Space Age)" there). Recipes net out catalysts, chances are expected values,
+   a recipe craftable in several machines is stored once per machine (circuits: assembling machine + electromagnetic plant).
+   Mining drills, pumpjacks, offshore pumps are zero-input recipes; the backward search treats them as source steps.
+   Throughput: `time_ticks` + `MachineIdentity.speed_tiers_json`; `/chains?rate=` (items/s) and the routes page add crafts/s and
+   machine counts per tier. A route follows ONE item, so side branches (e.g. the copper for a circuit) are not sized —
+   `needs_other_inputs` flags this. Not covered: boilers/burning/spoilage, recycling recipes, fluid temperatures, planet
+   `surface_conditions`, resource yield %, beacons/modules/quality.

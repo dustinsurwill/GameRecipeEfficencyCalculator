@@ -1,0 +1,10 @@
+{# GET form that picks the pack a contribution is for; the page reloads with ?pack=<id> #}
+<form class="card pad stack" method="get" action="{{ action }}" hx-boost="false">
+  <label class="field"><span>Which pack or game version is this for?</span>
+    <select name="pack" required>
+      <option value="">Choose…</option>
+      {% for p in packs %}<option value="{{ p.id }}" {{ 'selected' if pack and pack.id == p.id }}>{{ p.label }}</option>{% endfor %}
+    </select></label>
+  <button class="btn primary-btn" type="submit" style="align-self:flex-start">{{ 'Switch pack' if pack else 'Continue' }}</button>
+  {% if not packs %}<p class="empty">There are no packs yet. A superuser can create them under <a class="u" href="/contribute/catalog">Catalog</a>.</p>{% endif %}
+</form>

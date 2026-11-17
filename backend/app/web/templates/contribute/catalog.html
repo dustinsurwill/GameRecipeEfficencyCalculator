@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Catalog — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% macro opts(items, label_attr='name') %}<option value="">Choose…</option>{% for o in items %}<option value="{{ o.id }}">{{ o.label if o.label is defined else o.name }}</option>{% endfor %}{% endmacro %}
+{% block content %}
+<div class="stack-lg">
+  <header class="stack" style="gap:.25rem"><h1 class="h1">Catalog</h1>
+    <p class="muted small">Create in this order: game → game version → mod (→ mod version) and modpack (→ modpack version) → put mod versions into the pack. Then add items, machines and recipes.</p></header>
+  {% if saved %}<p class="alert" role="status">{{ saved }}</p>{% endif %}
+  {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/game" hx-boost="false"><h2 class="h2">Game</h2>
+    <div class="grid cols-2"><label class="field"><span>Name</span><input name="name" required placeholder="Satisfactory"></label>
+      <label class="field"><span>Slug</span><input name="slug" required placeholder="satisfactory" pattern="[a-z0-9-]+"></label></div>
+    <label class="field"><span>Counts recipes as</span><select name="recipe_metric"><option value="discrete">Discrete (items per craft)</option><option value="throughput">Throughput (items per second, machines with a speed)</option></select></label>
+    <button class="btn primary-btn" type="submit">Add game</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/game-version" hx-boost="false"><h2 class="h2">Game version</h2>
+    <div class="grid cols-2"><label class="field"><span>Game</span><select name="game" required>{{ opts(games) }}</select></label>
+      <label class="field"><span>Version</span><input name="version" required placeholder="1.0"></label></div>
+    <label class="inline"><input type="checkbox" name="is_latest" value="1"> This is the latest version</label>
+    <button class="btn primary-btn" type="submit">Add game version</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/mod" hx-boost="false"><h2 class="h2">Mod</h2>
+    <div class="grid cols-2"><label class="field"><span>Game</span><select name="game" required>{{ opts(games) }}</select></label>
+      <label class="field"><span>Name</span><input name="name" required placeholder="Mekanism"></label></div>
+    <label class="field"><span>Namespace <span class="field-hint">· the prefix of its item ids</span></span><input name="namespace" required placeholder="mekanism" pattern="[a-z0-9_.\-]+"></label>
+    <label class="field"><span>Description <span class="field-hint">· optional</span></span><input name="description"></label>
+    <button class="btn primary-btn" type="submit">Add mod</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/mod-version" hx-boost="false"><h2 class="h2">Mod version</h2>
+    <div class="grid cols-2"><label class="field"><span>Mod</span><select name="mod" required>{{ opts(mods) }}</select></label>
+      <label class="field"><span>For game version</span><select name="game_version" required>{{ opts(game_versions) }}</select></label></div>
+    <label class="field"><span>Version</span><input name="version" required placeholder="10.7.18"></label>
+    <button class="btn primary-btn" type="submit">Add mod version</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/modpack" hx-boost="false"><h2 class="h2">Modpack</h2>
+    <div class="grid cols-2"><label class="field"><span>Game</span><select name="game" required>{{ opts(games) }}</select></label>
+      <label class="field"><span>Name</span><input name="name" required placeholder="All The Mods 10"></label></div>
+    <div class="grid cols-2"><label class="field"><span>Slug <span class="field-hint">· used in URLs</span></span><input name="slug" required placeholder="atm10" pattern="[a-z0-9-]+"></label>
+      <label class="field"><span>Description <span class="field-hint">· optional</span></span><input name="description"></label></div>
+    <button class="btn primary-btn" type="submit">Add modpack</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/modpack-version" hx-boost="false"><h2 class="h2">Modpack version</h2>
+    <div class="grid cols-2"><label class="field"><span>Modpack</span><select name="modpack" required>{{ opts(modpacks) }}</select></label>
+      <label class="field"><span>For game version</span><select name="game_version" required>{{ opts(game_versions) }}</select></label></div>
+    <label class="field"><span>Version</span><input name="version" required placeholder="0.18.0"></label>
+    <p class="muted xs">New versions start as drafts; publish them from the admin pages.</p>
+    <button class="btn primary-btn" type="submit">Add modpack version</button></form>
+
+  <form class="card pad stack" method="post" action="/contribute/catalog/modpack-mod" hx-boost="false"><h2 class="h2">Put a mod in a pack</h2>
+    <div class="grid cols-2"><label class="field"><span>Modpack version</span><select name="modpack_version" required>{{ opts(modpack_versions) }}</select></label>
+      <label class="field"><span>Mod version</span><select name="mod_version" required>{{ opts(mod_versions) }}</select></label></div>
+    <button class="btn primary-btn" type="submit">Add to pack</button></form>
+</div>
+{% endblock %}

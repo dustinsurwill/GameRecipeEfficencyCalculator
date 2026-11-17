@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Contribute — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <header class="stack" style="gap:.25rem">
+    <h1 class="h1">Contribute</h1>
+    <p class="muted small" style="max-width:40rem">Everything the importers can load can also be entered by hand — for games, mods and packs that nothing exports yet, or to fix a recipe.</p>
+  </header>
+  {% if not user %}
+  <p class="alert" role="status"><a class="u" href="/login?next=/contribute">Log in</a> or <a class="u" href="/register">sign up</a> to add anything.</p>
+  {% endif %}
+  <div class="grid cols-2">
+    <a class="card pad stack" href="/contribute/recipe"><h2 class="h2">New recipe</h2>
+      <p class="muted small">Inputs, outputs, machine and time. {% if user and (user.is_superuser or user.is_curator) %}Yours are published right away.{% else %}It goes to the review queue before it appears.{% endif %}</p></a>
+    <a class="card pad stack" href="/contribute/item"><h2 class="h2">New item or fluid</h2>
+      <p class="muted small">Add something a recipe can use. Curators, superusers and the mod's admins.</p></a>
+    <a class="card pad stack" href="/contribute/machine"><h2 class="h2">New machine</h2>
+      <p class="muted small">A station or processing machine, with its speed tiers for throughput. Curators and superusers.</p></a>
+    <a class="card pad stack" href="/contribute/catalog"><h2 class="h2">Catalog</h2>
+      <p class="muted small">Games, game versions, mods, mod versions, modpacks and what each pack contains. Superusers.</p></a>
+  </div>
+  <p class="muted xs">API: <code>POST /api/v1/recipes</code>, <code>/items</code>, <code>/machines</code>, <code>/mods</code>, <code>/modpacks</code>, … (see <a class="u" href="/docs">/docs</a> when running in debug mode).</p>
+</div>
+{% endblock %}

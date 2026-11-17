@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}New recipe — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+{% macro rows(kind, n, values) %}
+  {% for i in range(n) %}{% set v = values[i] if values and i < values|length else ('', '') %}
+  <div class="row" style="gap:.5rem">
+    <input name="{{ kind }}_ref" value="{{ v[0] }}" placeholder="{{ 'Item, fluid or #tag — id or name' if kind == 'in' else 'Item or fluid — id or name' }}" aria-label="{{ kind }} item {{ i + 1 }}" style="flex:1">
+    <input name="{{ kind }}_qty" value="{{ v[1] }}" placeholder="qty" inputmode="decimal" aria-label="{{ kind }} quantity {{ i + 1 }}" style="width:5.5rem">
+  </div>{% endfor %}
+{% endmacro %}
+<div class="stack-lg">
+  <h1 class="h1">New recipe</h1>
+  {% if saved %}
+  <p class="alert" role="status">{% if approved %}Recipe added.{% else %}Thanks — the recipe was submitted and will appear once a curator approves it.{% endif %}
+    <a class="u" href="/contribute/recipe?pack={{ pack.id }}">Add another</a></p>
+  {% endif %}
+  {% with action='/contribute/recipe' %}{% include "contribute/_pack_picker.html" %}{% endwith %}
+  {% if pack %}
+  <form class="card pad stack" method="post" action="/contribute/recipe" hx-boost="false">
+    <input type="hidden" name="pack" value="{{ pack.id }}">
+    {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+    <div class="grid cols-2">
+      <label class="field"><span>Machine</span>
+        <select name="machine" required><option value="">Choose…</option>
+          {% for mc in machines %}<option value="{{ mc.id }}" {{ 'selected' if form.machine == mc.id|string }}>{{ mc.name }}</option>{% endfor %}</select>
+        <span class="field-hint">Not listed? <a class="u" href="/contribute/machine">Add the machine</a> first.</span></label>
+      <label class="field"><span>Belongs to mod</span>
+        <select name="mod_version" required><option value="">Choose…</option>
+          {% for mv in mods %}<option value="{{ mv.id }}" {{ 'selected' if form.mod_version == mv.id }}>{{ mv.label }}</option>{% endfor %}</select></label>
+    </div>
+    <div class="field"><span>Inputs</span><div class="stack" style="gap:.4rem">{{ rows('in', rows_in, form.get('in')) }}</div>
+      <span class="field-hint">Use an item's id (<code>base:iron-plate</code>) or its name. A fluid is a fluid whatever you type (<code>Water</code>). Prefix a tag with <code>#</code>.</span></div>
+    <div class="field"><span>Outputs</span><div class="stack" style="gap:.4rem">{{ rows('out', rows_out, form.get('out')) }}</div>
+      <span class="field-hint">Use the average for chance outputs: a 25% chance of 2 is 0.5. An item that doesn't exist yet needs <a class="u" href="/contribute/item?pack={{ pack.id }}">adding</a> first.</span></div>
+    <div class="grid cols-2">
+      <label class="field"><span>Time <span class="field-hint">· seconds, optional</span></span><input name="time_seconds" value="{{ form.time_seconds }}" inputmode="decimal" placeholder="e.g. 3.2"></label>
+      <label class="field"><span>Energy <span class="field-hint">· RF, optional</span></span><input name="energy_rf" value="{{ form.energy_rf }}" inputmode="numeric"></label>
+    </div>
+    <details class="adv"><summary>Advanced</summary>
+      <label class="field" style="padding-top:.75rem"><span>Recipe type <span class="field-hint">· leave empty to derive it from the mod and machine</span></span>
+        <input name="recipe_type" value="{{ form.recipe_type }}" placeholder="base:smelting"></label></details>
+    <button class="btn primary-btn" type="submit">{% if user and (user.is_superuser or user.is_curator) %}Add recipe{% else %}Submit for review{% endif %}</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

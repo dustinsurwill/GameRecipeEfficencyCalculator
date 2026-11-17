@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}New item — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <h1 class="h1">New item or fluid</h1>
+  {% if saved %}<p class="alert" role="status">Added <b>{{ saved.item_id }}</b>.{% if saved_url %} <a class="u" href="{{ saved_url }}">View it</a>{% endif %}</p>{% endif %}
+  {% with action='/contribute/item' %}{% include "contribute/_pack_picker.html" %}{% endwith %}
+  {% if pack %}
+  <form class="card pad stack" method="post" action="/contribute/item" hx-boost="false">
+    <input type="hidden" name="pack" value="{{ pack.id }}">
+    {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+    <label class="field"><span>Mod</span>
+      <select name="mod_version" required><option value="">Choose…</option>
+        {% for mv in mods %}<option value="{{ mv.id }}" {{ 'selected' if form.mod_version == mv.id }}>{{ mv.label }}</option>{% endfor %}</select></label>
+    <div class="grid cols-2">
+      <label class="field"><span>Id</span><input name="item_id" value="{{ form.item_id }}" required placeholder="namespace:name" autocomplete="off">
+        <span class="field-hint">Starts with the mod's namespace, e.g. <code>base:iron-plate</code>.</span></label>
+      <label class="field"><span>Name</span><input name="name" value="{{ form.name }}" required placeholder="Iron plate"></label>
+    </div>
+    <label class="field"><span>Kind</span>
+      <select name="kind">{% for k in ['item', 'fluid', 'chemical'] %}<option value="{{ k }}" {{ 'selected' if form.kind == k }}>{{ k|capitalize }}</option>{% endfor %}</select></label>
+    <label class="field"><span>Tags <span class="field-hint">· comma separated, optional</span></span><input name="tags" value="{{ form.tags }}" placeholder="c:ingots/iron"></label>
+    <button class="btn primary-btn" type="submit">Add item</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

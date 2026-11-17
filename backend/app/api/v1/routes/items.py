@@ -19,13 +19,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import contrib
+from app.auth.tokens import TokenData, get_current_token_data
 from app.db import get_session
-from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
+from app.models.identity import ItemAppearance, ItemAppearanceRead, ItemIdentity, MachineIdentity
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
 from app.models.status import RecipeStatus
 from app.models.versioning import ModPackVersion, ModPackModVersion
 
 router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.post("", response_model=ItemAppearanceRead, status_code=status.HTTP_201_CREATED)
+async def create_item(
+    body: contrib.ItemCreate,
+    session: AsyncSession = Depends(get_session),
+    token: TokenData = Depends(get_current_token_data),
+):
+    """Add an item, fluid or chemical to a mod version. Curators, superusers and the mod's admins only."""
+    try:
+        return await contrib.create_item(session, token, body)
+    except contrib.ContribError as e:
+        raise HTTPException(e.status_code, str(e))
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

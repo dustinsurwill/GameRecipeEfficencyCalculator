@@ -19,8 +19,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import and_, or_, select
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app import contrib
 from app.auth.tokens import TokenData, get_current_token_data
 from app.db import get_session
 from app.models.admin import (
@@ -29,7 +31,7 @@ from app.models.admin import (
     is_mod_admin,
     is_modpack_admin,
 )
-from app.models.recipe import Recipe, RecipeRead
+from app.models.recipe import Recipe, RecipeRead, RecipeSlot
 from app.models.status import RecipeReview, RecipeReviewCreate, RecipeReviewRead, RecipeStatus
 
 router = APIRouter(prefix="/recipes", tags=["recipes"])
@@ -102,7 +104,26 @@ async def _get_recipe_or_404(
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.get("/{recipe_id}", response_model=RecipeRead)
+@router.post("", response_model=RecipeRead, status_code=status.HTTP_201_CREATED)
+async def create_recipe(body: contrib.RecipeCreate, session: Session, token: Token) -> Recipe:
+    """
+    Enter a recipe by hand. Curators and superusers publish it immediately; everyone else's lands in
+    the review queue as `pending_review`. Items are given by id ("base:iron-plate"), by name, or as
+    "#tag" for inputs; fluids are consumed as aux inputs automatically.
+    """
+    try:
+        recipe = await contrib.create_recipe(session, token, body)
+    except contrib.ContribError as e:
+        raise HTTPException(e.status_code, str(e))
+    slots = (await session.exec(
+        select(RecipeSlot).where(RecipeSlot.recipe_id == recipe.id).order_by(RecipeSlot.slot_order)
+    )).scalars().all()
+    set_committed_value(recipe, "slots", list(slots))     # the relationship is lazy="noload"
+    return recipe
+
+
+# `{recipe_id:uuid}` so that /recipes/pending is not swallowed by this route
+@router.get("/{recipe_id:uuid}", response_model=RecipeRead)
 async def get_recipe(
     recipe_id: uuid.UUID,
     session: Session,

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}New machine — RecipeBook{% endblock %}
+{% block wrap_class %}narrow{% endblock %}
+{% block content %}
+<div class="stack-lg">
+  <h1 class="h1">New machine</h1>
+  {% if saved %}<p class="alert" role="status">Added <b>{{ saved.name }}</b>. Recipes can use it now.</p>{% endif %}
+  <form class="card pad stack" method="post" action="/contribute/machine" hx-boost="false">
+    {% if error %}<p class="alert error" role="alert">{{ error }}</p>{% endif %}
+    <div class="grid cols-2">
+      <label class="field"><span>Game</span><select name="game" required><option value="">Choose…</option>
+        {% for g in games %}<option value="{{ g.id }}" {{ 'selected' if form.game == g.id|string }}>{{ g.name }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Name</span><input name="name" value="{{ form.name }}" required placeholder="Electromagnetic Plant"></label>
+    </div>
+    <label class="field"><span>Recipe types <span class="field-hint">· comma separated, optional</span></span>
+      <input name="recipe_types" value="{{ form.recipe_types }}" placeholder="space-age:electromagnetics"></label>
+    <label class="inline"><input type="checkbox" name="time_based" value="1" {{ 'checked' if form.time_based }}> Recipes take time (and may need no inputs, like a mining drill)</label>
+    <label class="field"><span>Speed tiers <span class="field-hint">· optional, one per line: <code>Name | speed | category, category</code></span></span>
+      <textarea name="tiers" rows="4" placeholder="Assembling machine 2 | 0.75 | crafting, advanced-crafting">{{ form.tiers }}</textarea>
+      <span class="field-hint">Speed 1 = a recipe takes exactly its listed time. These give the machine counts on the route finder.</span></label>
+    <button class="btn primary-btn" type="submit">Add machine</button>
+  </form>
+</div>
+{% endblock %}

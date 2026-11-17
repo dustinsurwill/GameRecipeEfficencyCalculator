@@ -218,16 +218,6 @@ class RecipeRead(SQLModel):
     slots: list[RecipeSlotRead] = []
 
 
-class RecipeCreate(SQLModel):
-    """Used by the community recipe submission endpoint."""
-    machine_identity_id: uuid.UUID
-    recipe_type: str
-    time_ticks: int | None = None
-    energy_rf: int | None = None
-    mod_version_ids: list[uuid.UUID]
-    slots: list[dict]  # validated further in the endpoint
-
-
 class RecipeOverrideRead(SQLModel):
     model_config = {"from_attributes": True}
     id: uuid.UUID
