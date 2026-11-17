@@ -318,7 +318,7 @@ async def routes_page(
     return render(
         request, "routes.html", scope=scope, target=sel_target, start=sel_start, depth=depth,
         skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed, rank=rank,
-        throughput=throughput, rate=rate or "", per=per,
+        throughput=throughput, rate=rate or "", per=per, default_skip_names=bool(defaults),
     )
 
 

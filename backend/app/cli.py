@@ -29,7 +29,7 @@ async def promote(email: str, superuser: bool, curator: bool, demote: bool) -> N
                 user.is_curator = user.is_curator or curator or superuser
             session.add(user)
             print(f"{user.display_name} <{user.email}>: superuser={user.is_superuser} curator={user.is_curator}")
-    print("Sign out and in again (or wait for the session to renew) for the change to apply.")
+    print("The website sees the change immediately. API access tokens carry the role until they are renewed: log in again for a new one.")
 
 
 if __name__ == "__main__":

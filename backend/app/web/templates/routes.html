@@ -26,7 +26,7 @@
     <div class="field" style="max-width:24rem">
       <span>How much do you need? <span class="field-hint">· optional — shows how many machines</span></span>
       <div class="row">
-        <input type="number" name="rate" min="0" step="any" value="{{ rate }}" placeholder="e.g. 60" aria-label="Wanted output rate" style="max-width:9rem">
+        <input type="number" name="rate" min="0" step="any" value="{{ rate|qty if rate != '' else '' }}" placeholder="e.g. 60" aria-label="Wanted output rate" style="max-width:9rem">
         <select name="per" aria-label="Rate unit"><option value="min" {{ 'selected' if per == 'min' }}>items / minute</option><option value="s" {{ 'selected' if per == 's' }}>items / second</option></select>
       </div>
     </div>
@@ -53,7 +53,7 @@
                    hx-get="{{ scope.url('/_skip') }}" hx-trigger="input changed delay:150ms" hx-target="next .sr-list" hx-swap="innerHTML" hx-boost="false">
             <div class="sr-list" role="listbox"></div>
           </div>
-          <p class="muted xs">The Mystical Agriculture Reprocessor is skipped by default: it turns any seed into any essence, which otherwise dominates the results. Remove it to allow those routes.</p>
+          {% if default_skip_names %}<p class="muted xs">The Mystical Agriculture Reprocessor is skipped by default: it turns any seed into any essence, which otherwise dominates the results. Remove it to allow those routes.</p>{% endif %}
         </div>
       </div>
     </details>
