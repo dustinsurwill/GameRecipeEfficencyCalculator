@@ -79,7 +79,7 @@
           <td>
             <div class="small">{% if row.machines is not none %}<b class="num">{{ row.machines }}×</b> {{ row.tier }}{% else %}{{ row.machine }}{% endif %}
               <span class="muted xs">· {{ row.recipe }}, {{ row.seconds|qty }} s</span></div>
-            {% if row.machines is not none %}<div class="muted xs">{{ row.machines_exact|qty }} needed exactly{% if row.modules %} · {{ row.modules }}× {{ row.module_name }} each{% endif %}{% if row.productivity %} · +{{ (row.productivity * 100)|qty }}% output{% endif %}</div>{% endif %}
+            {% if row.machines is not none %}<div class="muted xs">{{ row.machines_exact|qty }} needed exactly{% if row.modules %} · {{ row.modules }}× {{ row.module_name }} each{% endif %}{% if row.productivity %} · +{{ (row.productivity * 100)|qty }}% output{% if row.base_productivity %} ({{ (row.base_productivity * 100)|qty }}% built in){% endif %}{% endif %}</div>{% endif %}
           </td>
           <td class="num" style="text-align:right;padding-right:1rem">{% if row.machines is not none %}{{ row.power_kw|power }}{% if row.fuel %} <span class="muted xs">fuel</span>{% endif %}{% endif %}</td>
         </tr>

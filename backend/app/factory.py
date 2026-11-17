@@ -121,20 +121,23 @@ def pick_tier(r: _Recipe, pref: dict[str, str]) -> dict | None:
     return electric[-1]                                     # fastest electric one
 
 
+MAX_PRODUCTIVITY = 3.0    # the game caps the productivity bonus at +300%
+
+
 def module_bonus(r: _Recipe, tier: dict, settings: Settings) -> tuple[float, float, float, int, str | None]:
     """(speed bonus, productivity bonus, consumption bonus, module count, module name) for one machine.
-    A module is only used where every effect it has is allowed by the machine (and productivity by the recipe)."""
+    The machine's own productivity (`base_productivity`: foundry, electromagnetic plant and biochamber give
+    +50%) always counts, but only for recipes that allow productivity. A module is only used where every
+    effect it has is allowed by the machine (and productivity by the recipe)."""
+    base = float(tier.get("base_productivity") or 0) if r.allow_productivity else 0.0
     mod = settings.modules.get(r.machine.id, {}).get(settings.module or "")
     slots = int(tier.get("module_slots") or 0)
-    if not mod or not slots:
-        return 0.0, 0.0, 0.0, 0, None
     allowed = set(tier.get("allowed_effects") or [])
-    if any(k not in allowed for k in mod.effects):
-        return 0.0, 0.0, 0.0, 0, None
-    if mod.effects.get("productivity", 0) > 0 and not r.allow_productivity:
-        return 0.0, 0.0, 0.0, 0, None
+    if (not mod or not slots or any(k not in allowed for k in mod.effects)
+            or (mod.effects.get("productivity", 0) > 0 and not r.allow_productivity)):
+        return 0.0, min(base, MAX_PRODUCTIVITY), 0.0, 0, None
     e = mod.effects
-    return (slots * e.get("speed", 0.0), slots * e.get("productivity", 0.0),
+    return (slots * e.get("speed", 0.0), min(base + slots * e.get("productivity", 0.0), MAX_PRODUCTIVITY),
             slots * e.get("consumption", 0.0), slots, mod.name)
 
 
@@ -208,7 +211,7 @@ def solve(
                 "recipe_id": str(r.id), "recipe": recipe_label(r), "machine": r.machine.name, "seconds": r.time_ticks / 60,
                 "crafts_per_s": 0.0, "depth": 0, "makes": [], "inputs": {}, "tier": None, "machines": None,
                 "machines_exact": None, "power_kw": 0.0, "fuel": False, "modules": n_modules, "module_name": module_name,
-                "productivity": prod_b, "_r": r, "_tier": tier, "_speed": speed_b, "_cons": cons_b,
+                "productivity": prod_b, "base_productivity": min(float(tier.get("base_productivity") or 0), prod_b) if tier and r.allow_productivity else 0.0, "_r": r, "_tier": tier, "_speed": speed_b, "_cons": cons_b,
             }
         node["crafts_per_s"] += crafts
         node["depth"] = max(node["depth"], depth.get(item, 0))

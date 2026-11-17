@@ -134,7 +134,7 @@ end
 
 -- keep output small: only the fields the importer reads
 local MACHINE = {"name", "type", "crafting_speed", "crafting_categories", "energy_usage", "energy_source",
-                 "module_slots", "allowed_effects", "__mod"}
+                 "module_slots", "allowed_effects", "effect_receiver", "__mod"}
 local KEEP = {
   recipe = true,
   resource = {"name", "category", "infinite", "minable", "__mod"},

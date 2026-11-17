@@ -363,6 +363,8 @@ def speed_tiers(pack_data: dict[str, list[dict]], names: dict[str, str]) -> dict
             "speed": speed, "categories": categories, "mod": entity["__mod"],
             "power_kw": _kw(entity.get("energy_usage")), "fuel": source == "burner",
             "module_slots": int(entity.get("module_slots") or 0),
+            # built-in productivity (Space Age: foundry, electromagnetic plant and biochamber give +50%)
+            "base_productivity": float(((entity.get("effect_receiver") or {}).get("base_effect") or {}).get("productivity") or 0),
             "allowed_effects": _effects(entity.get("allowed_effects")),
         })
 

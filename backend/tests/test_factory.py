@@ -118,3 +118,19 @@ def test_one_recipe_chosen_for_several_items_is_one_row():
 
 def test_unknown_target_is_not_found():
     assert not solve(graph(*line()), NAMES, "b:nothing", 1)["found"]
+
+
+def test_built_in_productivity_counts_only_where_the_recipe_allows_it_and_stacks_with_modules():
+    cast = timed(rec("t:cast", "foundry", [("b:ore", 1)], [("b:plate", 1)]), 1,
+                 [{**tiers(("Foundry", 4, 100, 4))[0], "base_productivity": 0.5}], prod=True)
+    belt = timed(rec("t:belt", "foundry", [("b:ore", 1)], [("b:gear", 1)]), 1,
+                 [{**tiers(("Foundry", 4, 100, 4))[0], "base_productivity": 0.5}], prod=False)
+    ore = timed(rec("t:mine", "drill", [], [("b:ore", 1)]), 1, tiers(("Drill", 1, 1, 0)))
+    g = graph(cast, belt, ore)
+    plate = by_item(solve(g, NAMES, "b:plate", 3))
+    assert abs(plate["b:plate"]["productivity"] - 0.5) < 1e-9 and plate["b:plate"]["base_productivity"] == 0.5
+    assert abs(plate["b:ore"]["rate"] - 2) < 1e-9                         # 3 plates from 2 ore at +50%
+    assert by_item(solve(g, NAMES, "b:gear", 3))["b:ore"]["rate"] == 3   # recipe does not allow productivity
+    prod = Module("Prod", {"productivity": 0.1})
+    both = by_item(solve(g, NAMES, "b:plate", 3, Settings(module="Prod", modules={cast.machine.id: {"Prod": prod}})))
+    assert abs(both["b:plate"]["productivity"] - 0.9) < 1e-9 and abs(both["b:ore"]["rate"] - 3 / 1.9) < 1e-9
