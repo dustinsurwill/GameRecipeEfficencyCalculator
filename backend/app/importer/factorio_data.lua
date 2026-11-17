@@ -133,14 +133,18 @@ local function enc(v, depth)
 end
 
 -- keep output small: only the fields the importer reads
+local MACHINE = {"name", "type", "crafting_speed", "crafting_categories", "energy_usage", "energy_source",
+                 "module_slots", "allowed_effects", "__mod"}
 local KEEP = {
   recipe = true,
   resource = {"name", "category", "infinite", "minable", "__mod"},
-  ["assembling-machine"] = {"name", "type", "crafting_speed", "crafting_categories", "__mod"},
-  furnace = {"name", "type", "crafting_speed", "crafting_categories", "__mod"},
-  ["rocket-silo"] = {"name", "type", "crafting_speed", "crafting_categories", "__mod"},
-  ["mining-drill"] = {"name", "type", "mining_speed", "resource_categories", "__mod"},
+  ["assembling-machine"] = MACHINE,
+  furnace = MACHINE,
+  ["rocket-silo"] = MACHINE,
+  ["mining-drill"] = {"name", "type", "mining_speed", "resource_categories", "energy_usage", "energy_source",
+                      "module_slots", "allowed_effects", "__mod"},
   ["offshore-pump"] = {"name", "type", "pumping_speed", "__mod"},
+  module = {"name", "category", "tier", "effect", "__mod"},
   tile = {"name", "fluid", "__mod"},
 }
 local out = {}

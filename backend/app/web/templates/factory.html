@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Factory — {{ scope.pack_name }} {{ scope.version }} — RecipeBook{% endblock %}
+{% block content %}
+<div class="stack" style="max-width:64rem">
+  <header class="stack" style="gap:.25rem">
+    <h1 class="h1">Factory</h1>
+    <p class="muted small" style="max-width:42rem">Pick what you want to make and how fast. This works out one recipe for everything it needs, how many machines run each, the power they draw and the raw resources that go in. Click “other ways” on a row to swap its recipe.</p>
+  </header>
+
+  <form class="card pad stack" method="get" action="{{ scope.url('/factory') }}" id="factory-form" hx-boost="false">
+    <div class="grid cols-2">
+      <div class="field"><span>I want <span class="field-hint">· required</span></span>{% with which='target', item=target %}{% include "partials/picker.html" %}{% endwith %}</div>
+      <div class="field"><span>How much <span class="field-hint">· decimals are fine</span></span>
+        <div class="row">
+          <input type="number" name="rate" min="0" step="any" value="{{ rate|qty }}" aria-label="Wanted output rate" style="max-width:9rem">
+          <select name="per" aria-label="Rate unit"><option value="min" {{ 'selected' if per == 'min' }}>items / minute</option><option value="s" {{ 'selected' if per == 's' }}>items / second</option></select>
+        </div></div>
+    </div>
+    <details class="adv" {{ 'open' if module or tier_pref }}>
+      <summary>Machines and modules {% if module %}<span class="muted small">· {{ module }}</span>{% endif %}</summary>
+      <div class="stack" style="gap:.9rem;padding-top:.75rem">
+        <label class="field" style="max-width:24rem"><span>Modules in every machine that can take them <span class="field-hint">· fills all slots</span></span>
+          <select name="module"><option value="">None</option>{% for n in module_names %}<option value="{{ n }}" {{ 'selected' if n == module }}>{{ n }}</option>{% endfor %}</select>
+          <span class="field-hint">A module is only used where the machine accepts everything it does, and productivity only where the recipe allows it.</span></label>
+        <div class="grid cols-2">
+          {% for mo in machine_options %}
+          <label class="field"><span>{{ mo.name }}</span>
+            <select name="t"><option value="">Fastest electric</option>{% for tn in mo.tiers %}<option value="{{ mo.name }}|{{ tn }}" {{ 'selected' if tier_pref.get(mo.name) == tn }}>{{ tn }}</option>{% endfor %}</select></label>
+          {% endfor %}
+        </div>
+      </div>
+    </details>
+    {% for item_id, rid in overrides.items() %}<input type="hidden" name="u" value="{{ item_id }}@{{ rid }}">{% endfor %}
+    <div class="row"><button class="btn primary-btn" style="margin-left:auto" type="submit">Calculate</button></div>
+  </form>
+
+  {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+
+  {% if result and result.found %}
+  <section class="card pad stack">
+    <h2 class="h2">Summary</h2>
+    <div class="grid cols-3 small">
+      <div><div class="muted xs">Machines</div><div class="bold num">{{ result.machines|num }}</div></div>
+      <div><div class="muted xs">Electric power</div><div class="bold num">{{ result.power_kw|power }}</div></div>
+      <div><div class="muted xs">Fuel burned by machines</div><div class="bold num">{{ result.fuel_kw|power if result.fuel_kw else '—' }}</div></div>
+    </div>
+    <div>
+      <div class="muted xs">Raw resources, per {{ unit }}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.25rem">
+        {% for x in result.resources %}<span class="badge" title="{{ x.machine or 'no recipe makes it' }}">{{ (x.rate * k)|qty }} {{ x.name }}{% if x.machines %} · {{ x.machines }}× {{ x.machine }}{% endif %}</span>{% endfor %}
+      </div>
+    </div>
+    {% if result.surplus %}<p class="muted xs">Left over (byproducts nothing here uses), per {{ unit }}:
+      {% for x in result.surplus %}{{ (x.rate * k)|qty }} {{ x.name }}{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+    {% for w in result.warnings %}<p class="alert">{{ w }}</p>{% endfor %}
+  </section>
+
+  <section class="card" style="overflow-x:auto">
+    <table class="factory-table" style="width:100%;border-collapse:collapse">
+      <thead><tr class="muted xs" style="text-align:left"><th style="padding:.6rem 1rem">Item</th><th>Made by</th><th style="text-align:right;padding-right:1rem">Power</th></tr></thead>
+      <tbody>
+      {% for row in result.rows %}
+        <tr style="border-top:1px solid var(--border, rgba(128,128,128,.25));vertical-align:top">
+          <td style="padding:.6rem 1rem;padding-left:calc(1rem + {{ row.depth * 1.1 }}rem)">
+            {% for mk in row.makes %}
+            <div {% if not loop.first %}style="margin-top:.35rem"{% endif %}>
+              <a class="u bold" href="{{ scope.url('/items/' ~ (mk.item_id|urlq)) }}">{{ mk.name }}</a>
+              <span class="num small">{{ (mk.rate * k)|qty }}</span><span class="muted xs">/{{ unit }}</span>
+              {% if mk.overridden %}<a class="u xs" href="{{ mk.reset_href }}">use the default recipe</a>{% endif %}
+              {% if mk.alternatives %}
+              <details class="xs"><summary class="muted">Other ways ({{ mk.alternatives|length }})</summary>
+                <ul style="margin:.25rem 0 0;padding-left:1rem">{% for alt in mk.alternatives %}<li><a class="u" href="{{ alt.href }}">{{ alt.machine }} · {{ alt.recipe }}</a> <span class="muted">from {{ alt.inputs }}</span></li>{% endfor %}</ul>
+              </details>{% endif %}
+            </div>
+            {% endfor %}
+            {% if row.inputs %}<div class="muted xs" style="margin-top:.25rem">needs {% for i in row.inputs %}{{ (i.rate * k)|qty }} {{ i.name }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+          </td>
+          <td>
+            <div class="small">{% if row.machines is not none %}<b class="num">{{ row.machines }}×</b> {{ row.tier }}{% else %}{{ row.machine }}{% endif %}
+              <span class="muted xs">· {{ row.recipe }}, {{ row.seconds|qty }} s</span></div>
+            {% if row.machines is not none %}<div class="muted xs">{{ row.machines_exact|qty }} needed exactly{% if row.modules %} · {{ row.modules }}× {{ row.module_name }} each{% endif %}{% if row.productivity %} · +{{ (row.productivity * 100)|qty }}% output{% endif %}</div>{% endif %}
+          </td>
+          <td class="num" style="text-align:right;padding-right:1rem">{% if row.machines is not none %}{{ row.power_kw|power }}{% if row.fuel %} <span class="muted xs">fuel</span>{% endif %}{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

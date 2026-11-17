@@ -43,7 +43,9 @@ from sqlalchemy.sql import exists
 import app.models  # noqa: F401
 from app.db import async_session_factory
 from app.importer.pipeline import PackSpec, import_recipes
-from app.models.identity import ItemAppearance, ItemIdentity, MachineIdentity
+from app.models.identity import (
+    ItemAppearance, ItemIdentity, MachineIdentity, MachineUpgradeItem, MachineUpgradeModifier,
+)
 from app.models.recipe import Recipe, RecipeModVersionLink, RecipeSlot
 from app.models.versioning import (
     Game, Mod, ModPackIdentity, ModPackModVersion, ModPackVersion, ModVersion,
@@ -63,11 +65,11 @@ MOD_NAMES = {
 # Files the Lua driver loads, in game load order, per mod.
 MOD_FILES: dict[str, list[str]] = {
     "base": [
-        "prototypes/recipe.lua", "prototypes/entity/entities.lua", "prototypes/entity/mining-drill.lua",
-        "prototypes/entity/resources.lua", "prototypes/tile/tiles.lua",
+        "prototypes/recipe.lua", "prototypes/item.lua", "prototypes/entity/entities.lua",
+        "prototypes/entity/mining-drill.lua", "prototypes/entity/resources.lua", "prototypes/tile/tiles.lua",
     ],
     "elevated-rails": ["prototypes/recipe/elevated-rails.lua"],
-    "quality": ["prototypes/recipe.lua"],
+    "quality": ["prototypes/recipe.lua", "prototypes/item.lua"],
     "space-age": [
         "prototypes/recipe.lua", "prototypes/entity/entities.lua", "prototypes/entity/big-mining-drill.lua",
         "prototypes/entity/resources.lua", "prototypes/tile/tiles-vulcanus.lua",
@@ -254,7 +256,7 @@ def _slots(flows: dict, owner: Callable[[str], str]) -> tuple[list[Slot], list[S
 
 
 def _make(pack: str, mod: str, key: str, category_ns: str, category: str, ticks: int,
-          ins: dict, outs: dict, owner: Callable[[str], str]) -> CliRecipe:
+          ins: dict, outs: dict, owner: Callable[[str], str], productivity: bool = False) -> CliRecipe:
     in_items, in_fluids = _slots(ins, owner)
     out_items, out_fluids = _slots(outs, owner)
     return CliRecipe(
@@ -266,6 +268,7 @@ def _make(pack: str, mod: str, key: str, category_ns: str, category: str, ticks:
         outputs=out_items + out_fluids,     # fluid outputs are ordinary output slots flagged as fluid
         aux_inputs=in_fluids,
         time_ticks=ticks,
+        allow_productivity=productivity,
     )
 
 
@@ -294,7 +297,7 @@ def convert_recipes(
             seen.add(machine)
             key = f"recipe/{r['name']}" + (f"@{category}" if len(seen) > 1 else "")
             recipes.append(_make(pack, r["__mod"], key, category_mod(category, r["__mod"]), category,
-                                 ticks, ins, outs, owner))
+                                 ticks, ins, outs, owner, bool(r.get("allow_productivity"))))
     return recipes
 
 
@@ -323,25 +326,44 @@ def mining_recipes(
         out.append(_make(pack, res["__mod"], f"mining/{res['name']}", res["__mod"], category, ticks,
                          ins, outs, owner))
     seen: set[str] = set()
-    for tile in sorted(tiles, key=lambda t: t["name"]):
+    for tile in sorted(tiles, key=lambda t: (t.get("__mod", pump_mod) != pump_mod, t["name"])):
         fluid = tile.get("fluid")
         if not fluid or fluid in seen:
             continue
         seen.add(fluid)
         # one offshore pump moves 20 units/tick = 1200/s; the recipe is one second of pumping
-        out.append(_make(pack, pump_mod, f"pumping/{fluid}", pump_mod, PUMP_CATEGORY, 60,
+        # the pump recipe belongs to the mod that defines the tile (Fulgora's oil ocean is Space Age's)
+        out.append(_make(pack, tile.get("__mod", pump_mod), f"pumping/{fluid}", pump_mod, PUMP_CATEGORY, 60,
                          {}, {("fluid", fluid): 1200.0}, owner))
     return out
 
 
+def _kw(text: Any) -> float:
+    """'150kW' -> 150, '2MW' -> 2000, '500W' -> 0.5 (kilowatts)."""
+    m = re.match(r"^\s*([\d.]+)\s*([kKMG]?)W", str(text or ""))
+    if not m:
+        return 0.0
+    return float(m.group(1)) * {"": 0.001, "k": 1, "K": 1, "M": 1000, "G": 1e6}[m.group(2)]
+
+
+def _effects(value: Any) -> list[str]:
+    return [value] if isinstance(value, str) else list(value or [])
+
+
 def speed_tiers(pack_data: dict[str, list[dict]], names: dict[str, str]) -> dict[str, list[dict]]:
-    """Machine identity name -> [{name, speed, categories, mod}] for every machine that can run its recipes."""
+    """Machine identity name -> tiers, one per machine that can run its recipes:
+    {name, speed, categories, mod, power_kw, fuel (burner machines: power_kw is fuel power), module_slots,
+     allowed_effects}."""
     tiers: dict[str, list[dict]] = {}
 
     def add(machine: str, entity: dict, speed: float, categories: list[str]) -> None:
+        source = (entity.get("energy_source") or {}).get("type")
         tiers.setdefault(machine, []).append({
             "name": names.get(entity["name"], entity["name"].replace("-", " ").capitalize()),
             "speed": speed, "categories": categories, "mod": entity["__mod"],
+            "power_kw": _kw(entity.get("energy_usage")), "fuel": source == "burner",
+            "module_slots": int(entity.get("module_slots") or 0),
+            "allowed_effects": _effects(entity.get("allowed_effects")),
         })
 
     for kind in ("assembling-machine", "furnace", "rocket-silo"):
@@ -358,6 +380,20 @@ def speed_tiers(pack_data: dict[str, list[dict]], names: dict[str, str]) -> dict
     for lst in tiers.values():
         lst.sort(key=lambda t: (t["speed"], t["name"]))
     return tiers
+
+
+# Module effects the calculator uses -> MachineUpgradeModifier.modifier_type. Values are additive
+# fractions (speed 0.2 = +20%), so `stacks_additively` is True; consumption is negative for efficiency.
+MODULE_MODIFIERS = {"speed": "SPEED", "productivity": "YIELD_BONUS", "consumption": "ENERGY_USE"}
+
+
+def module_catalog(pack_data: dict[str, list[dict]], names: dict[str, str], owner: Callable[[str], str]) -> list[dict]:
+    out = []
+    for m in pack_data.get("module", []):
+        effects = {k: float(v) for k, v in (m.get("effect") or {}).items() if k in MODULE_MODIFIERS and v}
+        if effects and m.get("category") != "quality":     # quality is not modelled, so its modules are skipped
+            out.append({"item_id": f"{owner(m['name'])}:{m['name']}", "name": names.get(m["name"], m["name"]), "effects": effects})
+    return out
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -378,6 +414,10 @@ async def _purge() -> None:
                 ModPackIdentity, ModPackIdentity.id == ModPackVersion.identity_id
             ).where(ModPackIdentity.game_id == game.id)
             await session.exec(delete(ModPackModVersion).where(ModPackModVersion.modpack_id.in_(pack_versions)))
+            machines = select(MachineIdentity.id).where(MachineIdentity.game_id == game.id)
+            upgrades = select(MachineUpgradeItem.id).where(MachineUpgradeItem.machine_id.in_(machines))
+            await session.exec(delete(MachineUpgradeModifier).where(MachineUpgradeModifier.upgrade_item_id.in_(upgrades)))
+            await session.exec(delete(MachineUpgradeItem).where(MachineUpgradeItem.machine_id.in_(machines)))
             mod_versions = select(ModVersion.id).join(Mod, Mod.id == ModVersion.mod_id).where(Mod.game_id == game.id)
             used = select(RecipeSlot.item_appearance_id).where(RecipeSlot.item_appearance_id.is_not(None))
             await session.exec(
@@ -425,6 +465,38 @@ async def _apply_machine_data(tiers: dict[str, list[dict]]) -> None:
                 )
 
 
+async def _apply_modules(modules: list[dict], tiers: dict[str, list[dict]]) -> int:
+    """Every machine with module slots gets the game's modules as upgrade items (max_slots = its biggest tier).
+    Which effects a tier accepts is in the tier data (`allowed_effects`)."""
+    made = 0
+    async with async_session_factory() as session:
+        async with session.begin():
+            game = (await session.exec(select(Game).where(Game.slug == "factorio"))).scalars().one()
+            machines = {m.name: m for m in (await session.exec(
+                select(MachineIdentity).where(MachineIdentity.game_id == game.id))).scalars().all()}
+            for machine_name, lst in tiers.items():
+                slots = max((t["module_slots"] for t in lst), default=0)
+                if not slots or machine_name not in machines:
+                    continue
+                for mod in modules:
+                    appearance = (await session.exec(
+                        select(ItemAppearance).where(ItemAppearance.item_id == mod["item_id"]).limit(1)
+                    )).scalars().first()
+                    item = MachineUpgradeItem(
+                        machine_id=machines[machine_name].id, item_appearance_id=appearance.id if appearance else None,
+                        display_name=mod["name"], max_slots=slots, data_source="game files",
+                    )
+                    session.add(item)
+                    await session.flush()
+                    for effect, value in mod["effects"].items():
+                        session.add(MachineUpgradeModifier(
+                            upgrade_item_id=item.id, modifier_type=MODULE_MODIFIERS[effect], multiplier=value,
+                            stacks_additively=True,
+                        ))
+                    made += 1
+    return made
+
+
 async def run(factorio_dir: Path) -> None:
     data_dir = factorio_dir / "data"
     if not (data_dir / "base" / "info.json").exists():
@@ -435,6 +507,7 @@ async def run(factorio_dir: Path) -> None:
 
     all_tiers: dict[str, list[dict]] = {}
     all_names: dict[str, str] = {}
+    all_modules: dict[str, dict] = {}
     for pack in PACKS:
         print(f"{pack.name}:")
         data = load_pack_data(data_dir, pack)
@@ -472,8 +545,11 @@ async def run(factorio_dir: Path) -> None:
             known = {(t["name"], t["mod"]) for t in all_tiers.get(machine, [])}
             all_tiers.setdefault(machine, []).extend(t for t in lst if (t["name"], t["mod"]) not in known)
         all_names.update(names)
+        for mod in module_catalog(data, names, owner):
+            all_modules.setdefault(mod["item_id"], mod)
 
     await _apply_machine_data(all_tiers)
+    print(f"  Module upgrades stored: {await _apply_modules(list(all_modules.values()), all_tiers)}")
     print(f"  Display names updated: {await _apply_display_names(all_names)}")
 
 

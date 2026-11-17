@@ -21,7 +21,7 @@
     {% set segs = request.url.path.strip('/').split('/') %}
     {% set section = segs[3] if segs|length > 3 else '' %}
     <div class="nav-links">
-      {% for path, label in [('items', 'Items'), ('mods', 'Mods'), ('machines', 'Machines'), ('routes', 'Routes')] %}
+      {% for path, label in [('items', 'Items'), ('mods', 'Mods'), ('machines', 'Machines'), ('routes', 'Routes')] + ([('factory', 'Factory')] if scope.recipe_metric == 'throughput' else []) %}
       <a href="{{ scope.url('/' ~ path) }}" {% if section == path %}aria-current="page"{% endif %}>{{ label }}</a>
       {% endfor %}
     </div>

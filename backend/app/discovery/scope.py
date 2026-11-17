@@ -39,6 +39,7 @@ class Scope:
     game_version: str
     mod_version_ids: frozenset[uuid.UUID]
     is_latest: bool
+    recipe_metric: str = "discrete"      # "throughput" games get the factory calculator
 
     @property
     def key(self) -> uuid.UUID:
@@ -117,5 +118,5 @@ async def resolve_scope(
         game_id=game.id, game_slug=game.slug, game_name=game.name,
         pack_id=pack.id, pack_slug=pack.slug, pack_name=pack.name,
         version_id=mpv.id, version=mpv.version, game_version=gv.version if gv else "",
-        mod_version_ids=frozenset(links), is_latest=mpv.id == latest.id,
+        mod_version_ids=frozenset(links), is_latest=mpv.id == latest.id, recipe_metric=game.recipe_metric,
     )

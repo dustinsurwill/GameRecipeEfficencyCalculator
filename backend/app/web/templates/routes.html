@@ -35,7 +35,7 @@
       <summary>Advanced options <span class="muted small">· skipping {{ skips|length + (1 if skip_crafting else 0) }}{% if skip_crafting %} (incl. crafting tables){% endif %}</span></summary>
       <div class="stack" style="gap:.9rem;padding-top:.75rem">
         <div class="row">
-          <label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>
+          {% if has_crafting %}<label class="inline"><input type="checkbox" name="crafting" value="1" {{ 'checked' if skip_crafting }}> Ignore crafting-table recipes</label>{% endif %}
           <label class="row small">Rank by
             <select name="rank">
               <option value="auto" {{ 'selected' if rank == 'auto' }}>Automatic (best yield when you pick a starting item)</option>

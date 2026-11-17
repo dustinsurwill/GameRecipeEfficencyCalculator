@@ -67,6 +67,8 @@ class _Recipe:
     import_key: str
     time_ticks: int | None
     energy_rf: int | None
+    allow_productivity: bool = False
+    mod: str = ""                      # namespace of the mod the recipe belongs to
     inputs: list[_Slot] = field(default_factory=list)
     outputs: list[_Slot] = field(default_factory=list)
     aux_inputs: list[_Slot] = field(default_factory=list)
@@ -233,6 +235,15 @@ async def _load_recipe_graph(
         for m in machine_result.scalars().all()
     }
 
+    recipe_mods: dict[uuid.UUID, str] = {}
+    for rid, ns in (await session.exec(
+        select(RecipeModVersionLink.recipe_id, Mod.namespace)
+        .join(ModVersion, ModVersion.id == RecipeModVersionLink.mod_version_id)
+        .join(Mod, Mod.id == ModVersion.mod_id)
+        .where(RecipeModVersionLink.mod_version_id.in_(mod_version_ids))
+    )).all():
+        recipe_mods.setdefault(rid, ns)
+
     # Only approved recipes participate in traversal
     recipe_result = await session.exec(
         select(Recipe).where(
@@ -271,6 +282,8 @@ async def _load_recipe_graph(
             import_key=db_r.import_key,
             time_ticks=db_r.time_ticks,
             energy_rf=db_r.energy_rf,
+            allow_productivity=db_r.allow_productivity,
+            mod=recipe_mods.get(db_r.id, ""),
         )
         for db_slot in sorted(slots_by_recipe[db_r.id], key=lambda s: s.slot_order):
             item_id = (
@@ -300,8 +313,12 @@ async def _load_recipe_graph(
 # ── Graph index ───────────────────────────────────────────────────────────────
 
 class _RecipeGraph:
-    def __init__(self, recipes: list[_Recipe], tag_to_items: dict[str, set[str]]):
+    def __init__(self, recipes: list[_Recipe], tag_to_items: dict[str, set[str]], all_inputs: bool = False):
+        """`all_inputs`: let the forward search enter a recipe through ANY of its item inputs. By default it
+        follows only the first item input (a crafting recipe is "about" its main ingredient); factory games
+        (Factorio) need every input, e.g. an assembler fed by plates and gears is reached from either."""
         self.tag_to_items = tag_to_items
+        self.all_inputs = all_inputs
         self._by_input: dict[str, list[_Recipe]] = defaultdict(list)
         self._by_output: dict[str, list[_Recipe]] = defaultdict(list)
 
@@ -311,21 +328,25 @@ class _RecipeGraph:
                 if slot.item_id:
                     self._by_output[slot.item_id].append(r)
 
-            # Forward traversal: index by the primary (first non-fluid) input, and by every fluid or
-            # chemical input, so melt -> cast style routes can be followed from a fluid.
-            primary = next((s for s in r.inputs if not s.is_fluid), None)
-            for slot in ([primary] if primary else []) + [g for g in r.gin if g.is_fluid]:
+            # Forward traversal: index by the entry inputs (see `_entry_slots`), so melt -> cast style
+            # routes can be followed from a fluid.
+            for slot in self._entry_slots(r):
                 if slot.item_id:
                     self._by_input[slot.item_id].append(r)
                 elif slot.tag_string:
                     for item_id in tag_to_items.get(slot.tag_string, set()):
                         self._by_input[item_id].append(r)
 
+    def _entry_slots(self, r: _Recipe) -> list[_Slot]:
+        """Inputs the forward search can enter this recipe through: the first item input (or all of them)
+        plus every fluid or chemical input."""
+        items = [s for s in r.inputs if not s.is_fluid]
+        return (items if self.all_inputs else items[:1]) + [g for g in r.gin if g.is_fluid]
+
     def forward_sources(self, r: _Recipe) -> list[str]:
         """Items from which the forward search can enter this recipe (see __init__)."""
         out: list[str] = []
-        primary = next((x for x in r.inputs if not x.is_fluid), None)
-        for slot in ([primary] if primary else []) + [g for g in r.gin if g.is_fluid]:
+        for slot in self._entry_slots(r):
             if slot.item_id:
                 out.append(slot.item_id)
             elif slot.tag_string:
@@ -359,6 +380,14 @@ _graph_lock = asyncio.Lock()
 _search_slots = asyncio.Semaphore(2)  # concurrent DFS threads; the rest queue instead of piling up
 
 
+async def _is_throughput_game(session: AsyncSession, mod_version_ids: set[uuid.UUID]) -> bool:
+    metric = (await session.exec(
+        select(Game.recipe_metric).join(Mod, Mod.game_id == Game.id).join(ModVersion, ModVersion.mod_id == Mod.id)
+        .where(ModVersion.id.in_(mod_version_ids)).limit(1)
+    )).scalars().first()
+    return metric == "throughput"
+
+
 async def _get_graph(session: AsyncSession, mod_version_ids: set[uuid.UUID]) -> _LoadedGraph:
     key = frozenset(mod_version_ids)
     now = time.monotonic()
@@ -371,7 +400,7 @@ async def _get_graph(session: AsyncSession, mod_version_ids: set[uuid.UUID]) -> 
             return hit
         recipes, tag_to_items, item_to_canonical = await _load_recipe_graph(session, set(key))
         loaded = _LoadedGraph(
-            graph=_RecipeGraph(recipes, tag_to_items),
+            graph=_RecipeGraph(recipes, tag_to_items, all_inputs=await _is_throughput_game(session, set(key))),
             tag_to_items=tag_to_items,
             item_to_canonical=item_to_canonical,
             n_recipes=len(recipes),
@@ -500,6 +529,7 @@ def _forward_dfs(
     allow_cycles: bool,
     budget: _Budget,
     steps_to: dict[str, int] | None = None,
+    by_recipe: bool = False,
 ) -> tuple[list[tuple[list[tuple[_Recipe, float]], bool, int | None]], int]:
     all_chains: list[tuple[list, bool, int | None]] = []
     cycles_excluded = 0
@@ -520,10 +550,10 @@ def _forward_dfs(
         if steps_to is not None and depth + steps_to.get(item_id, max_depth + 1) > max_depth:
             return
 
-        if not states.add((item_id, _sequence(steps))):
+        if not states.add((item_id, _sequence(steps, by_recipe=by_recipe))):
             return      # same item reached through the same machines already; only recipe variants differ
         if item_id in target_items:
-            if seen.add(_sequence(steps)):
+            if seen.add(_sequence(steps, by_recipe=by_recipe)):
                 all_chains.append((list(steps), False, None))
                 budget.add_chain()
             return
@@ -712,14 +742,15 @@ def _route_cost(steps: list[tuple[_Recipe, float]], ratio: float, higher_is_bett
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
 
-def _sequence(chain: list[tuple[_Recipe, float]], leaf: str = "") -> tuple:
+def _sequence(chain: list[tuple[_Recipe, float]], leaf: str = "", by_recipe: bool = False) -> tuple:
     """Identity of a route for de-duplication: the machines used, in order, and where it starts.
     Two crafting recipes that differ only in layout are the same route to a player."""
-    return tuple(r.machine.id for r, _ in chain) + (leaf,)
+    return tuple((r.id if by_recipe else r.machine.id) for r, _ in chain) + (leaf,)
 
 
 def _rank_forward(
     chains: list[tuple[list, bool, int | None]], target_items: set[str], by_yield: bool = True,
+    by_recipe: bool = False,
 ) -> list[tuple[list, bool, int | None]]:
     """Best route per distinct recipe sequence (loops last): highest yield first, or cheapest first."""
     best: dict[tuple, tuple[tuple, tuple]] = {}
@@ -734,7 +765,7 @@ def _rank_forward(
             y = sum(s.quantity * runs_last for s in r_last.outputs if s.item_id in target_items)
             simple = _route_cost(chain, y, True)
             cost = (False, _has_side_inputs(chain), -round(y, 4), simple) if by_yield else (False, False, simple, -y)
-        key = _sequence(chain)
+        key = _sequence(chain, by_recipe=by_recipe)
         if key not in best or cost < best[key][0]:
             best[key] = (cost, entry)
     return [e for _, e in sorted(best.values(), key=lambda v: v[0])]
@@ -1240,10 +1271,11 @@ async def get_chains(
         async with _search_slots:
             raw_chains, cycles_excluded, truncated = await asyncio.to_thread(
                 _deepen,
-                lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b, steps_to),
+                lambda d, b: _forward_dfs(start_items, target_items_set, graph, excl, d, allow_cycles, b, steps_to,
+                                          graph.all_inputs),
                 max_depth, enough,
             )
-        raw_chains = _rank_forward(raw_chains, target_items_set, by_yield)
+        raw_chains = _rank_forward(raw_chains, target_items_set, by_yield, graph.all_inputs)
         memory.trim()
         total_found = len(raw_chains)
         paged = raw_chains[:limit]

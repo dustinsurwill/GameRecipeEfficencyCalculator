@@ -226,3 +226,20 @@ def test_throughput_counts_machines_per_wanted_rate():
         final_outputs=[{"item_id": "b:plate", "quantity": 1.0}],
     )
     assert plain["steps"][0]["seconds_per_craft"] == 3.2 and "machines" not in plain["steps"][0]
+
+
+def test_factory_games_enter_a_recipe_through_any_input_and_keep_routes_through_different_recipes():
+    plate_cast = rec("t:cast", "foundry", [("fluid:t:lava", 10)], [("t:plate", 1)])
+    pack = rec("t:pack", "asm", [("t:plate", 1), ("t:gear", 1)], [("t:science", 1)])     # gear is the SECOND input
+    gear_cast = rec("t:castg", "foundry", [("fluid:t:lava", 10)], [("t:gear", 1)])
+    gear_asm = rec("t:gearasm", "asm", [("t:plate", 2)], [("t:gear", 1)])
+
+    def routes(all_inputs):
+        g = _RecipeGraph([plate_cast, pack, gear_cast, gear_asm], {}, all_inputs=all_inputs)
+        chains, _, _ = _deepen(lambda d, b: _forward_dfs(["fluid:t:lava"], {"t:science"}, g, _Excluder(), d, False, b, None, all_inputs), 5)
+        return {tuple(r.recipe_type for r, _ in c[0]) for c in _rank_forward(chains, {"t:science"}, False, all_inputs)}
+
+    only_first = routes(False)
+    assert only_first == {("t:cast", "t:pack")}                    # the gear branch is never entered
+    every = routes(True)
+    assert ("t:castg", "t:pack") in every and ("t:cast", "t:gearasm", "t:pack") in every and len(every) >= 3

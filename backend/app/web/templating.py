@@ -35,8 +35,11 @@ def fmt_num(n) -> str:
 
 
 def fmt_qty(n) -> str:
-    if float(n).is_integer():
+    n = float(n)
+    if n.is_integer():
         return str(int(n))
+    if 0 < abs(n) < 0.01:
+        return f"{n:.2g}"             # 0.0042 stays 0.0042 instead of becoming 0
     return f"{n:.2f}".rstrip("0").rstrip(".")
 
 
@@ -72,8 +75,17 @@ def ns_of(ident: str) -> str:
     return ident.split(":")[0]
 
 
+def fmt_power(kw) -> str:
+    kw = float(kw)
+    if kw >= 1_000_000:
+        return f"{fmt_qty(kw / 1_000_000)} GW"
+    if kw >= 1000:
+        return f"{fmt_qty(kw / 1000)} MW"
+    return f"{fmt_qty(kw)} kW"
+
+
 templates.env.filters.update(
-    ns_of=ns_of, num=fmt_num, qty=fmt_qty, tag_label=tag_label, ticks=fmt_ticks, urlq=q,
+    power=fmt_power, ns_of=ns_of, num=fmt_num, qty=fmt_qty, tag_label=tag_label, ticks=fmt_ticks, urlq=q,
 )
 templates.env.globals.update(hue=hue, initials=initials, qs=qs, urlq=q)
 

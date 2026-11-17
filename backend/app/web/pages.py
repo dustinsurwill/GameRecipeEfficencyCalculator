@@ -14,12 +14,17 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from urllib.parse import urlencode
+
+from app import factory
 from app.api.v1.routes import chains
 from app.db import get_session
 from app.discovery import service
 from app.discovery.index import DiscoveryIndex
+from app.models.identity import MachineUpgradeItem, MachineUpgradeModifier
 from app.models.versioning import Game
 from app.discovery.scope import (
     Scope, ScopeNotFound, get_game, list_games, list_packs, list_versions,
@@ -287,7 +292,9 @@ async def routes_page(
     rate: float = Query(0, ge=0, le=1_000_000), per: str = "min",
 ):
     # `ran` marks a submitted form: an unchecked box then means "include", and empty skip lists mean "skip nothing".
-    skip_crafting = bool(crafting) if ran else True
+    # the crafting-table option only exists for games that have Minecraft-style crafting recipes
+    has_crafting = any(t in CRAFTING_TYPES for m in idx.machines for t in m["recipe_types"])
+    skip_crafting = (bool(crafting) if ran else True) and has_crafting
     defaults = _default_skip_machines(idx)
     if not ran:
         xm = defaults
@@ -314,11 +321,90 @@ async def routes_page(
             )
         except HTTPException as e:
             error = str(e.detail)
-    changed = bool(ran) and (set(xm) != set(defaults) or bool(xmod) or bool(xi) or not skip_crafting or depth != 6 or rank != 'auto')
+    changed = bool(ran) and (set(xm) != set(defaults) or bool(xmod) or bool(xi) or (has_crafting and not skip_crafting) or depth != 6 or rank != 'auto')
     return render(
         request, "routes.html", scope=scope, target=sel_target, start=sel_start, depth=depth,
         skip_crafting=skip_crafting, result=result, error=error, idx=idx, skips=skips, advanced_open=changed, rank=rank,
-        throughput=throughput, rate=rate or "", per=per, default_skip_names=bool(defaults),
+        throughput=throughput, rate=rate or "", per=per, default_skip_names=bool(defaults), has_crafting=has_crafting,
+    )
+
+
+MODULE_EFFECTS = {"SPEED": "speed", "YIELD_BONUS": "productivity", "ENERGY_USE": "consumption"}
+
+
+async def _load_modules(session: AsyncSession, game_id: uuid.UUID) -> dict[str, dict[str, factory.Module]]:
+    """machine id -> {module name: Module} from the machines' upgrade items."""
+    from app.models.identity import MachineIdentity
+    rows = (await session.execute(
+        select(MachineUpgradeItem, MachineUpgradeModifier)
+        .join(MachineUpgradeModifier, MachineUpgradeModifier.upgrade_item_id == MachineUpgradeItem.id)
+        .join(MachineIdentity, MachineIdentity.id == MachineUpgradeItem.machine_id)
+        .where(MachineIdentity.game_id == game_id)
+    )).all()
+    out: dict[str, dict[str, factory.Module]] = {}
+    for item, mod in rows:
+        if mod.modifier_type not in MODULE_EFFECTS:
+            continue
+        m = out.setdefault(str(item.machine_id), {}).setdefault(item.display_name, factory.Module(item.display_name, {}))
+        m.effects[MODULE_EFFECTS[mod.modifier_type]] = mod.multiplier
+    return out
+
+
+@router.get("/{game}/{pack}/{version}/factory")
+async def factory_page(
+    request: Request, scope: Scope = Sc, idx: DiscoveryIndex = Idx, session: AsyncSession = Depends(get_session),
+    target: str = "", rate: float = Query(60, ge=0, le=1_000_000_000), per: str = "min", module: str = "",
+    u: list[str] = Query([]), t: list[str] = Query([]),
+):
+    """The whole factory for N of an item per minute (or second): recipe tree, machines, power, raw resources."""
+    if scope.recipe_metric != "throughput":
+        raise HTTPException(404, f"{scope.game_name} recipes are not time based, so there is nothing to size.")
+    per = per if per in ("s", "min") else "min"
+    loaded = await chains._get_graph(session, set(scope.mod_version_ids))
+    modules = await _load_modules(session, scope.game_id)
+    machines = {}
+    for rs in loaded.graph._by_output.values():
+        for r in rs:
+            machines.setdefault(r.machine.id, r.machine)
+    machine_options = sorted(
+        ({"name": m.name, "tiers": [x["name"] for x in m.tiers]} for m in machines.values() if len(m.tiers) > 1),
+        key=lambda m: m["name"])
+    module_names = sorted({n for ms in modules.values() for n in ms})
+
+    overrides: dict[str, uuid.UUID] = {}
+    for entry in u:
+        item, _, rid = entry.rpartition("@")
+        try:
+            overrides[item] = uuid.UUID(rid)
+        except ValueError:
+            pass
+    tier_pref = {m: tier for m, _, tier in (e.partition("|") for e in t) if tier}
+    sel_target = idx.by_item_id.get(target)
+    result = None
+    if sel_target and rate > 0:
+        rate_s = rate / 60 if per == "min" else rate
+        result = factory.solve(
+            loaded.graph, loaded.item_to_canonical, target, rate_s,
+            factory.Settings(overrides=overrides, tier_pref=tier_pref, module=module or None, modules=modules),
+        )
+
+        def url(new_overrides: dict[str, uuid.UUID]) -> str:
+            pairs = [("target", target), ("rate", f"{rate:g}"), ("per", per)]
+            pairs += [("module", module)] if module else []
+            pairs += [("t", e) for e in t] + [("u", f"{i}@{rid}") for i, rid in new_overrides.items()]
+            return scope.url("/factory") + "?" + urlencode(pairs)
+
+        for row in result["rows"]:
+            for make in row["makes"]:
+                make["overridden"] = make["item_id"] in overrides
+                make["reset_href"] = url({k: v for k, v in overrides.items() if k != make["item_id"]}) if make["overridden"] else None
+                for alt in make["alternatives"]:
+                    alt["href"] = url({**overrides, make["item_id"]: uuid.UUID(alt["id"])})
+    return render(
+        request, "factory.html", scope=scope, target=sel_target, rate=rate, per=per, module=module, result=result,
+        k=60 if per == "min" else 1, unit="min" if per == "min" else "s", machine_options=machine_options,
+        module_names=module_names, tier_pref=tier_pref, overrides=overrides,
+        error="No recipe makes that item." if result and not result["found"] else None,
     )
 
 

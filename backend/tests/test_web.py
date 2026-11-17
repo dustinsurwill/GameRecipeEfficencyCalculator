@@ -264,3 +264,55 @@ async def test_mod_recipe_counts_use_the_owning_mod_not_the_type_prefix(client: 
     assert mods["mekanism"]["recipe_count"] == 1
     assert mods["newmod"]["recipe_count"] == 1          # its recipe's type is `tool:press`
     assert "Press" in client.get("/minecraft/atm10/2.0/machines", headers=HTML).text
+
+
+# ── Factory page ──────────────────────────────────────────────────────────────
+
+@pytest.fixture
+async def factory_world(seeded):
+    """The seeded Factorio gets a timed smelting recipe with machine tiers: iron-plate from iron-ore."""
+    import json
+    from sqlalchemy import select
+    async with factory() as s:
+        fa = (await s.execute(select(Game).where(Game.slug == "factorio"))).scalars().one()
+        fa.recipe_metric = "throughput"
+        mv = (await s.execute(select(ModVersion).join(Mod).where(Mod.game_id == fa.id))).scalars().one()
+        plate = (await s.execute(select(ItemAppearance).where(ItemAppearance.item_id == "base:iron-plate"))).scalars().one()
+        ident = ItemIdentity(canonical_name="Iron ore", game_id=fa.id)
+        s.add(ident)
+        await s.flush()
+        ore = ItemAppearance(identity_id=ident.id, mod_version_id=mv.id, item_id="base:iron-ore", namespace="base", tags_json="[]")
+        furnace = MachineIdentity(game_id=fa.id, name="Furnace", is_time_based=True, recipe_types_json='["base:smelting"]',
+                                  speed_tiers_json=json.dumps([{"name": "Stone furnace", "speed": 1, "categories": ["smelting"], "power_kw": 90, "fuel": True, "module_slots": 0, "allowed_effects": []},
+                                                               {"name": "Electric furnace", "speed": 2, "categories": ["smelting"], "power_kw": 180, "module_slots": 2, "allowed_effects": ["speed"]}]))
+        s.add_all([ore, furnace])
+        await s.flush()
+        rec = Recipe(machine_identity_id=furnace.id, recipe_type="base:smelting", import_key="f1", time_ticks=192, status=RecipeStatus.APPROVED)
+        s.add(rec)
+        await s.flush()
+        s.add_all([RecipeSlot(recipe_id=rec.id, slot_type="input", item_appearance_id=ore.id, quantity=1),
+                   RecipeSlot(recipe_id=rec.id, slot_type="output", item_appearance_id=plate.id, quantity=1),
+                   RecipeModVersionLink(recipe_id=rec.id, mod_version_id=mv.id)])
+        await s.commit()
+
+
+async def test_factory_page_sizes_the_tree_and_accepts_decimal_rates(client: TestClient, factory_world):
+    page = client.get("/factorio/space/1.0/factory", params={"target": "base:iron-plate", "rate": "37.5", "per": "min"}, headers=HTML)
+    assert page.status_code == 200
+    # 37.5/min = 0.625/s, 3.2 s each at speed 2 -> exactly 1 electric furnace; 37.5/min of ore needed
+    assert "Electric furnace" in page.text and "37.5" in page.text and "Iron ore" in page.text
+    assert "180 kW" in page.text
+    tiny = client.get("/factorio/space/1.0/factory", params={"target": "base:iron-plate", "rate": "0.005", "per": "s"}, headers=HTML)
+    assert tiny.status_code == 200 and "0.005" in tiny.text
+    pick = client.get("/factorio/space/1.0/factory", params={"target": "base:iron-plate", "rate": "60", "t": "Furnace|Stone furnace"}, headers=HTML).text
+    assert "Stone furnace" in pick and "fuel" in pick
+
+
+async def test_factory_page_is_only_for_time_based_games(client: TestClient, seeded):
+    assert client.get("/minecraft/atm10/1.0/factory", headers=HTML).status_code == 404
+    assert "Factory" not in client.get("/minecraft/atm10/1.0/items", headers=HTML).text.split("</nav>")[0]
+
+
+async def test_route_page_hides_minecraft_crafting_option_elsewhere(client: TestClient, factory_world):
+    fact = client.get("/factorio/space/1.0/routes", headers=HTML).text
+    assert "Ignore crafting-table" not in fact and "Mystical Agriculture" not in fact

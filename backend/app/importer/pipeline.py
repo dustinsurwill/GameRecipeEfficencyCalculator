@@ -344,6 +344,7 @@ async def _import_recipe(
         modpack_version_id=modpack.id if is_modpack_recipe else None,
         time_ticks=int(cli_recipe.time_ticks) if cli_recipe.time_ticks else None,
         conditions_met=cli_recipe.conditions_met,
+        allow_productivity=cli_recipe.allow_productivity,
         status=RecipeStatus.APPROVED,
     )
     session.add(recipe)

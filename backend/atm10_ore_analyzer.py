@@ -54,6 +54,7 @@ class Recipe:
     aux_inputs: list[Slot] = field(default_factory=list)   # chemicals, fluids
     time_ticks: Optional[int] = None
     conditions_met: bool = True  # almostunified conditional result
+    allow_productivity: bool = False  # Factorio: productivity modules allowed
 
     def primary_output(self) -> Optional[Slot]:
         return self.outputs[0] if self.outputs else None

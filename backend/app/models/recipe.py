@@ -76,6 +76,8 @@ class Recipe(TimestampMixin, table=True):
     # Machine costs — base values before any upgrade modifiers
     time_ticks: int | None = None          # null = no time cost (vanilla crafting)
     energy_rf: int | None = None           # null = no energy cost
+    # Factorio: productivity modules may be used on this recipe
+    allow_productivity: bool = Field(default=False)
     energy_source: str | None = None       # "export" | "wiki" | "community"
 
     # Whether almostunified or another condition system marked this active
@@ -213,6 +215,7 @@ class RecipeRead(SQLModel):
     modpack_version_id: uuid.UUID | None
     time_ticks: int | None
     energy_rf: int | None
+    allow_productivity: bool = False
     conditions_met: bool
     status: str
     slots: list[RecipeSlotRead] = []

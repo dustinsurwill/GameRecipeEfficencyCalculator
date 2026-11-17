@@ -21,6 +21,7 @@ Reference docs: [Database schema + tech stack + env vars](docs/schema.md) · [Ar
 │   │   ├── models/          # __init__.py imports ALL models in FK order (required by Alembic)
 │   │   ├── importer/pipeline.py   # KubeJS export ingestion CLI + shared `import_recipes()`
 │   │   ├── importer/factorio.py + factorio_data.lua  # Factorio: Lua sandbox reads recipes/machines/resources from an install (needs `lua5.4`)
+│   │   ├── factory.py       # factory calculator: whole-tree solve (recipe per item, machines, modules, power); pure
 │   │   ├── contrib.py       # hand entry rules: create item / machine / recipe (API + /contribute share it)
 │   │   ├── cli.py           # `python -m app.cli promote <email> --superuser|--curator`
 │   │   ├── discovery/
@@ -132,7 +133,14 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    applied, so base is a separate mod version "x (Space Age)" there). Recipes net out catalysts, chances are expected values,
    a recipe craftable in several machines is stored once per machine (circuits: assembling machine + electromagnetic plant).
    Mining drills, pumpjacks, offshore pumps are zero-input recipes; the backward search treats them as source steps.
-   Throughput: `time_ticks` + `MachineIdentity.speed_tiers_json`; `/chains?rate=` (items/s) and the routes page add crafts/s and
-   machine counts per tier. A route follows ONE item, so side branches (e.g. the copper for a circuit) are not sized —
-   `needs_other_inputs` flags this. Not covered: boilers/burning/spoilage, recycling recipes, fluid temperatures, planet
-   `surface_conditions`, resource yield %, beacons/modules/quality.
+   Machine data lives in `MachineIdentity.speed_tiers_json` (speed, power_kw, fuel, module_slots, allowed_effects); the
+   game's modules are `MachineUpgradeItem/Modifier` rows (SPEED / YIELD_BONUS / ENERGY_USE, additive fractions);
+   `Recipe.allow_productivity` says where productivity modules may go.
+   Route search: for throughput games the forward search enters a recipe through ANY item input and routes are
+   de-duplicated per recipe (not per machine), so lava -> automation science pack finds the iron-gear branches too.
+   `/{game}/{pack}/{version}/factory` (throughput games only) solves the whole tree: cheapest recipe per item (recipes from
+   a non-primary mod carry a big penalty, so base wins where it can), swap any item's recipe via "other ways", pick a machine
+   tier per type, fill all slots with a module. Rates may be decimals. Not covered: beacons, belts, pollution, fuel for
+   burner machines (reported as kW), mining productivity, quality, boilers/spoilage, recycling recipes, fluid temperatures,
+   planet `surface_conditions`, resource yield %. Minecraft's upgrade items (speed/energy modules of mods) still have no
+   import source, so its pages show no power or module effects.
