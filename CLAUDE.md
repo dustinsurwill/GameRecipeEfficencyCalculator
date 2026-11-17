@@ -19,7 +19,8 @@ Reference docs: [Database schema + tech stack + env vars](docs/schema.md) · [Ar
 │   │   ├── main.py          # app, security headers, error pages, router order (catch-alls LAST)
 │   │   ├── auth/            # password.py, tokens.py, refresh.py, oauth.py
 │   │   ├── models/          # __init__.py imports ALL models in FK order (required by Alembic)
-│   │   ├── importer/pipeline.py   # KubeJS export ingestion CLI
+│   │   ├── importer/pipeline.py   # KubeJS export ingestion CLI + shared `import_recipes()`
+│   │   ├── importer/factorio.py   # Factorio: reads recipe Lua from an installed game (needs `lua5.4`)
 │   │   ├── discovery/
 │   │   │   ├── scope.py     # Scope = game + modpack + version -> set of mod_version_ids
 │   │   │   ├── index.py     # in-memory DiscoveryIndex, one per scope (max 2 cached)
@@ -63,6 +64,8 @@ uv run pytest tests/ -v     # SQLite in-memory, no Postgres needed
 
 # Import recipe data (see README)
 DEBUG=false uv run python -m app.importer --export-dir ../allthemons_export
+# Factorio (Vanilla = base, Space Age = base + space-age + quality + elevated-rails); Steam path is the default
+DEBUG=false uv run python -m app.importer.factorio [--factorio-dir ~/.local/share/Steam/steamapps/common/Factorio]
 ```
 
 > **uv note:** `alembic` and `uvicorn` are only on the uv venv PATH — always prefix with `uv run`.
@@ -113,8 +116,13 @@ Call `invalidate_graph_cache()` / `discovery.index.invalidate()` after an import
    `import_key` already exists, so after parser changes `TRUNCATE recipe_slots, recipe_mod_version_links, recipes CASCADE` and re-import.
    Route quality: items whose only producers are excluded (crafting) count as "raw" (e.g. armor -> ingot recycling).
 2. **Rate limiting** — slowapi on `GET /chains` and the `/routes` page, keyed by client IP.
-3. **Recipe submission UI** — authenticated users submit via `POST /api/v1/recipes` (API exists, no page yet).
+3. **Recipe submission** — there is NO create endpoint yet (`/api/v1/recipes` only has get/submit/review/retract for
+   existing drafts), so community recipes can't be entered by hand. Needs `POST /api/v1/recipes` + a page.
 4. **Email wiring** — fastapi-mail for verification and password reset.
 5. **tags_json → Postgres ARRAY** — migration + GIN index. Tag member lists only include items seen in recipes.
 6. **Admin scope ids** — mod/modpack admin memberships use the *identity* id; `Recipe.modpack_id` and review
    checks still compare against version ids. Unify.
+7. **Factorio gaps** — imported from the game's Lua (312 recipes; catalysts netted out, chances as expected values; ids
+   `base:iron-plate`, `fluid:base:water`, water is free). Not covered: mining/boilers/offshore pumps, spoilage, recycling
+   recipes (generated at load time), `data-updates` tweaks, fluid temperatures, planet `surface_conditions`, and
+   throughput (`time_ticks` is stored but chains ignore it — see docs/architecture.md TODO 7).

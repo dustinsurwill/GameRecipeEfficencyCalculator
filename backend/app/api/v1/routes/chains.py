@@ -74,7 +74,7 @@ class _Recipe:
 
 
 # Free in every pack; following them would make nearly every machine route end in "water".
-_FREE_FLUIDS = frozenset({"fluid:minecraft:water"})
+_FREE_FLUIDS = frozenset({"fluid:minecraft:water", "fluid:base:water"})
 
 
 def _bare_ns(item_id: str) -> str:

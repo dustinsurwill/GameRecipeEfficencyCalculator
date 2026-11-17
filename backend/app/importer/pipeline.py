@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -321,6 +322,7 @@ async def _import_recipe(
     fluid_tags: TagIndex,
     is_modpack_recipe: bool,
     item_mod_versions: dict[str, ModVersion],
+    source_priority: int | None = None,
 ) -> None:
     import_key = cli_recipe.id
 
@@ -335,7 +337,10 @@ async def _import_recipe(
         machine_identity_id=machine.id,
         recipe_type=cli_recipe.type,
         import_key=import_key,
-        source_priority=SourcePriority.MODPACK if is_modpack_recipe else SourcePriority.MOD,
+        source_priority=(
+            source_priority if source_priority is not None
+            else SourcePriority.MODPACK if is_modpack_recipe else SourcePriority.MOD
+        ),
         modpack_version_id=modpack.id if is_modpack_recipe else None,
         time_ticks=int(cli_recipe.time_ticks) if cli_recipe.time_ticks else None,
         conditions_met=cli_recipe.conditions_met,
@@ -397,48 +402,44 @@ async def _import_recipe(
 
 # ── Main import function ──────────────────────────────────────────────────────
 
-async def run_import(
-    export_dir: Path,
+@dataclass
+class PackSpec:
+    """One modpack (version) to create. `namespaces` limits which mods it contains; None = all of them."""
+    name: str
+    slug: str
+    version: str
+    namespaces: set[str] | None = None
+
+
+async def import_recipes(
+    cli_recipes: list[CliRecipe],
+    tag_index: TagIndex,
+    fluid_tags: TagIndex,
+    *,
     game_name: str,
     game_slug: str,
     game_version_str: str,
-    modpack_name: str,
-    modpack_slug: str,
-    modpack_version: str,
+    packs: list[PackSpec],
+    mods_meta: dict[str, dict] | None = None,
+    modpack_recipe_keys: set[str] | frozenset[str] = frozenset(),
+    recipe_metric: str = "discrete",
+    source_priority: int | None = None,
     batch_size: int = 500,
 ) -> None:
-    print(f"Loading recipes from {export_dir} ...")
-    cli_recipes = load_all_recipes(export_dir)
-    print(f"  Parsed {len(cli_recipes)} recipes")
-
-    print("Loading tags ...")
-    tag_index = load_tags(export_dir)
-    fluid_tags = load_fluid_tags(export_dir)
-    print(f"  Loaded {len(tag_index._tag_to_items)} item tags, {len(fluid_tags._tag_to_items)} fluid tags")
-
-    # Load mod metadata from mods.json if present
-    mods_meta: dict[str, dict] = {}
-    mods_file = export_dir / "mods.json"
-    if mods_file.exists():
-        raw = json.loads(mods_file.read_text())
-        for entry in raw:
-            mods_meta[entry["id"]] = entry
-
-    # Determine which recipes came from "added_recipes" (modpack overrides)
-    modpack_recipe_keys: set[str] = set()
-    added_dir = export_dir / "added_recipes"
-    if added_dir.exists():
-        for f in added_dir.rglob("*.json"):
-            modpack_recipe_keys.add(str(f.relative_to(export_dir)))
-
+    """Write already-parsed recipes to the database (shared by every importer)."""
+    mods_meta = mods_meta or {}
     print("Connecting to database ...")
     async with async_session_factory() as session:
         async with session.begin():
             game = await _get_or_create_game(session, game_name, game_slug)
+            game.recipe_metric = recipe_metric
+            session.add(game)
             game_version = await _get_or_create_game_version(session, game, game_version_str)
-            modpack = await _get_or_create_modpack(
-                session, game_version, modpack_name, modpack_slug, modpack_version
-            )
+            pack_versions = [
+                await _get_or_create_modpack(session, game_version, p.name, p.slug, p.version)
+                for p in packs
+            ]
+            modpack = pack_versions[0]
 
             # Group recipes by namespace to create mod records
             namespace_to_recipes: dict[str, list[CliRecipe]] = {}
@@ -465,7 +466,9 @@ async def run_import(
                 mv = await _get_or_create_mod_version(
                     session, mod, game_version, mod_version_str
                 )
-                await _ensure_modpack_mod_version_link(session, modpack, mv)
+                for spec, pack_version in zip(packs, pack_versions):
+                    if spec.namespaces is None or ns in spec.namespaces:
+                        await _ensure_modpack_mod_version_link(session, pack_version, mv)
                 mod_versions[ns] = mv
 
             print(f"  Created/verified {len(mod_versions)} mod versions")
@@ -491,7 +494,7 @@ async def run_import(
                     is_modpack_recipe = cli_recipe.id in modpack_recipe_keys
                     await _import_recipe(
                         session, cli_recipe, game, mv, modpack, tag_index, fluid_tags, is_modpack_recipe,
-                        mod_versions,
+                        mod_versions, source_priority=source_priority,
                     )
                     imported += 1
 
@@ -501,6 +504,49 @@ async def run_import(
         print(f"\n  Imported {imported} recipes, skipped {skipped}")
 
     print("Import complete.")
+
+
+async def run_import(
+    export_dir: Path,
+    game_name: str,
+    game_slug: str,
+    game_version_str: str,
+    modpack_name: str,
+    modpack_slug: str,
+    modpack_version: str,
+    batch_size: int = 500,
+) -> None:
+    """Import a KubeJS debug export."""
+    print(f"Loading recipes from {export_dir} ...")
+    cli_recipes = load_all_recipes(export_dir)
+    print(f"  Parsed {len(cli_recipes)} recipes")
+
+    print("Loading tags ...")
+    tag_index = load_tags(export_dir)
+    fluid_tags = load_fluid_tags(export_dir)
+    print(f"  Loaded {len(tag_index._tag_to_items)} item tags, {len(fluid_tags._tag_to_items)} fluid tags")
+
+    # Load mod metadata from mods.json if present
+    mods_meta: dict[str, dict] = {}
+    mods_file = export_dir / "mods.json"
+    if mods_file.exists():
+        raw = json.loads(mods_file.read_text())
+        for entry in raw:
+            mods_meta[entry["id"]] = entry
+
+    # Determine which recipes came from "added_recipes" (modpack overrides)
+    modpack_recipe_keys: set[str] = set()
+    added_dir = export_dir / "added_recipes"
+    if added_dir.exists():
+        for f in added_dir.rglob("*.json"):
+            modpack_recipe_keys.add(str(f.relative_to(export_dir)))
+
+    await import_recipes(
+        cli_recipes, tag_index, fluid_tags,
+        game_name=game_name, game_slug=game_slug, game_version_str=game_version_str,
+        packs=[PackSpec(modpack_name, modpack_slug, modpack_version)],
+        mods_meta=mods_meta, modpack_recipe_keys=modpack_recipe_keys, batch_size=batch_size,
+    )
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
