@@ -25,7 +25,7 @@ docker compose up --build
 ```
 
 - Website + API: http://localhost:8080 (API docs at `/docs` only when `DEBUG=true`)
-- Database: localhost:5432 (user/pass: `recipebook`)
+- Database: localhost:5432, bound to loopback only (dev user/pass: `recipebook` — change it before any real deployment)
 
 The container runs `alembic upgrade head` on startup, as a non-root user, capped at 2 GB.
 Then import data (below) and open `/minecraft/atm10/latest`.
@@ -174,3 +174,18 @@ in chain queries immediately.
 For code contributions, open a pull request. The backend test suite (`uv run pytest`)
 must stay green. For new API endpoints, follow the patterns in
 `backend/app/api/v1/routes/`.
+
+---
+
+## License and Disclaimer
+
+The code is released under the [MIT License](LICENSE).
+
+RecipeBook is an unofficial fan project and is not affiliated with, endorsed by, or sponsored by
+Mojang, Microsoft, Wube Software, Coffee Stain Studios, or the authors of any mod or modpack
+(including All The Mods). Minecraft, Factorio, Satisfactory and all other game, mod and modpack
+names are trademarks of their respective owners and are used only to say which games the tool works with.
+
+Recipe data is not distributed with this repository. It is read from the user's own game install or
+KubeJS export and remains subject to the licenses of the games and mods it comes from. Do not commit
+exports (`*_export/` is git-ignored).
